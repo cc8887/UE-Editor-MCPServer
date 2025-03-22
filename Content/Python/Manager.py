@@ -37,7 +37,6 @@ class Manager:
         log("Manager _regist_tick")
         self._loop = loop
         self._callback_handle = register_slate_pre_tick_callback(self.tick)
-        log(self._callback_handle)
 
     def _unregist_tick(self):
         from _unreal_slate import unregister_slate_pre_tick_callback
