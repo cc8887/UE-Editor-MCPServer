@@ -1,9 +1,6 @@
 from asyncio import ProactorEventLoop
 
-# 添加常量定义
-# _MIN_SCHEDULED_TIMER_HANDLES = 100
-# _MIN_CANCELLED_TIMER_HANDLES_FRACTION = 0.5
-# MAXIMUM_SELECT_TIMEOUT = 60000  # 1 day
+
 
 class WinCustomEventLoop(ProactorEventLoop):
     def __init__(self, proactor=None):

@@ -1,7 +1,6 @@
 import importlib
 # import unreal
 
-# unreal.log("加载完成Manager")
 modular_Manager = None
 modular_MCPServer = None
 

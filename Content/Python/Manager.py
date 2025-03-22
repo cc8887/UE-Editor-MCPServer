@@ -4,7 +4,7 @@ from unreal import log
 
 
 class Manager:
-
+    # guard task prevent asyncio event loop block
     @staticmethod
     async def guard_task():
         while True:
@@ -13,7 +13,6 @@ class Manager:
     @staticmethod
     async def heart_fun():
         while True:
-            #打印当前时间
             log(time.time())
             await asyncio.sleep(1)
             log(time.time())
@@ -39,6 +38,7 @@ class Manager:
         self._loop = loop
         self._callback_handle = register_slate_pre_tick_callback(self.tick)
         log(self._callback_handle)
+
     def _unregist_tick(self):
         from _unreal_slate import unregister_slate_pre_tick_callback
         log("Manager unregist_tick")
@@ -48,9 +48,12 @@ class Manager:
             log("Manager unregist_tick _callback_handle is None")
         self._loop = None
         self._callback_handle = None
+
+    # register_slate_pre_tick_callback needs delta_time
     def tick(self, delta_time:float):
         self._loop.tick()
-    # 销毁时需要清理资源
+        log("Manager tick")
+    # clean resources
     def destroy(self):
         log("Manager destroy")
         self._unregist_tick()
@@ -59,29 +62,3 @@ class Manager:
             self._loop = None
     def __del__(self):
         log("Manager __del__")
-
-
-# m:Manager = None
-
-# def start_starlette():
-# from StarletteServer import start_starlette_server, stop_starlette_server,run_server
-#     global m
-#     unreal.log("Starting Starlette server...")
-    
-#     loop.slow_callback_duration = 0
-#     asyncio.set_event_loop(loop)
-#     # success, _guard_task, _starlette_server_task = start_starlette_server(existing_loop=current_loop)
-#     # if success:
-#     #     unreal.log("Starlette server started successfully")
-#     # else:
-#     #     unreal.log_error("Failed to start Starlette server")
-#     loop.run_until_complete(asyncio.gather(Manager.guard_task(),heart_fun(),run_server()))
-#     # 需要通过Manager把Event挂到manager上使之生效
-#     m = Manager(loop)
-#     unreal.log("Starlette server started successfully")
-
-
-# def stop_starlette():
-#     unreal.log("Stopping Starlette server...")
-#     stop_starlette_server()
-#     unreal.log("Starlette server stopped successfully")
