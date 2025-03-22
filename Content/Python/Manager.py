@@ -52,7 +52,6 @@ class Manager:
     # register_slate_pre_tick_callback needs delta_time
     def tick(self, delta_time:float):
         self._loop.tick()
-        log("Manager tick")
     # clean resources
     def destroy(self):
         log("Manager destroy")

@@ -14,7 +14,7 @@ class MCPServer:
         @self._mcp_app.call_tool()
         async def call_tool() -> list[types.TextContent]:
             log("call_tool")
-            return ["Call Tools Success"]
+            return [types.TextContent(type="text",text="Call Tools Success")]
         
         @self._mcp_app.list_tools()
         async def list_tools() -> list[types.Tool]:
@@ -29,7 +29,6 @@ class MCPServer:
         
         async def handle_sse(request):
             log("handle_sse - starting")
-            # 确保初始化完成
             initialization_options = self._mcp_app.create_initialization_options()
             
             async with self._sse.connect_sse(
