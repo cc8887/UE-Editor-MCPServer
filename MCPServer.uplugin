@@ -1,0 +1,37 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "MCPServer",
+	"Description": "Encapsulate UE editor Into MCP Server For AI Agent Use",
+	"Category": "Tools",
+	"CreatedBy": "ccc887",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"PythonRequirements": [
+		{
+			"Platform": "Win64",
+			"Requirements": [
+				"mcp>=1.5.0",
+				"anyio",
+				"click",
+				"starlette"
+
+			]
+		}
+	],
+	"Modules": [
+		{
+			
+			"Name": "MCPServer",
+			"Type": "Editor",
+			"LoadingPhase" : "PostEngineInit"
+		}
+	]
+}
