@@ -12,8 +12,10 @@ class MCPServer:
         self._sse = SseServerTransport("/messages/")
         
         @self._mcp_app.call_tool()
-        async def call_tool() -> list[types.TextContent]:
-            log("call_tool")
+        async def call_tools(
+            name: str, arguments: dict
+        ) -> list[types.TextContent]:
+            log(f"call_tool name: {name} arg:{arguments}")
             return [types.TextContent(type="text",text="Call Tools Success")]
         
         @self._mcp_app.list_tools()
