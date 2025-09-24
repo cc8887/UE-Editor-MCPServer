@@ -38,12 +38,102 @@ class MCPServer:
             ) -> list[types.TextContent]:
                 log(f"call_tool name: {name} arg:{arguments}")
                 if(name == "execute_command"):
-                    # Execute in current thread
+                    # Execute in current thread with log capture
                     try:
+                        # Import unreal module for log capture functionality
+                        import unreal
+                        
+                        # Clear any previous logs and enable log capture
+                        unreal.MCPLogCaptureBlueprintLibrary.clear_captured_logs()
+                        unreal.MCPLogCaptureBlueprintLibrary.enable_log_capture(True)
+                        
+                        # Execute the Python code
                         exec(arguments['code'])
-                        return [types.TextContent(type="text", text="Success")]
+                        
+                        # Get captured logs
+                        captured_logs = unreal.MCPLogCaptureBlueprintLibrary.get_captured_logs()
+                        
+                        # Disable log capture
+                        unreal.MCPLogCaptureBlueprintLibrary.disable_log_capture()
+                        
+                        # Return success message with captured logs
+                        result_text = "Execution completed successfully."
+                        if captured_logs:
+                            result_text += "\n\nCaptured Logs:\n" + captured_logs
+                        
+                        return [types.TextContent(type="text", text=result_text)]
+                        
                     except SyntaxError as e:
+                        # Disable log capture in case of error
+                        try:
+                            import unreal
+                            unreal.MCPLogCaptureBlueprintLibrary.disable_log_capture()
+                        except:
+                            pass
                         return [types.TextContent(type="text", text=f"Syntax error: {e}")]
+                    except Exception as e:
+                        # Disable log capture in case of error and get any captured logs
+                        try:
+                            import unreal
+                            captured_logs = unreal.MCPLogCaptureBlueprintLibrary.get_captured_logs()
+                            unreal.MCPLogCaptureBlueprintLibrary.disable_log_capture()
+                            
+                            error_text = "Execution error: " + str(e)
+                            if captured_logs:
+                                error_text += "\n\nCaptured Logs:\n" + captured_logs
+                            return [types.TextContent(type="text", text=error_text)]
+                        except:
+                            return [types.TextContent(type="text", text=f"Execution error: {e}")]
+                            
+                elif(name == "excute_file"):
+                    # Execute file with log capture
+                    try:
+                        import unreal
+                        
+                        # Clear any previous logs and enable log capture
+                        unreal.MCPLogCaptureBlueprintLibrary.clear_captured_logs()
+                        unreal.MCPLogCaptureBlueprintLibrary.enable_log_capture(True)
+                        
+                        # Execute the Python file
+                        with open(arguments['file'], 'r', encoding='utf-8') as f:
+                            code = f.read()
+                        exec(code)
+                        
+                        # Get captured logs
+                        captured_logs = unreal.MCPLogCaptureBlueprintLibrary.get_captured_logs()
+                        
+                        # Disable log capture
+                        unreal.MCPLogCaptureBlueprintLibrary.disable_log_capture()
+                        
+                        # Return success message with captured logs
+                        result_text = "File '" + arguments['file'] + "' executed successfully."
+                        if captured_logs:
+                            result_text += "\n\nCaptured Logs:\n" + captured_logs
+                        
+                        return [types.TextContent(type="text", text=result_text)]
+                        
+                    except FileNotFoundError:
+                        # Disable log capture in case of error
+                        try:
+                            import unreal
+                            unreal.MCPLogCaptureBlueprintLibrary.disable_log_capture()
+                        except:
+                            pass
+                        return [types.TextContent(type="text", text=f"File not found: {arguments['file']}")]
+                    except Exception as e:
+                        # Disable log capture in case of error and get any captured logs
+                        try:
+                            import unreal
+                            captured_logs = unreal.MCPLogCaptureBlueprintLibrary.get_captured_logs()
+                            unreal.MCPLogCaptureBlueprintLibrary.disable_log_capture()
+                            
+                            error_text = "File execution error: " + str(e)
+                            if captured_logs:
+                                error_text += "\n\nCaptured Logs:\n" + captured_logs
+                            return [types.TextContent(type="text", text=error_text)]
+                        except:
+                            return [types.TextContent(type="text", text=f"File execution error: {e}")]
+                            
                 return [types.TextContent(type="text", text="Failed")]
             
             @self._mcp_app.list_tools()

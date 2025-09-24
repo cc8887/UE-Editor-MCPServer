@@ -8,13 +8,13 @@
 
 DEFINE_LOG_CATEGORY(LogMCPServer);
 
-// 静态成员变量定义
+// Static member variable definitions
 TSharedPtr<FMCPLogCaptureDevice> FMCPServerModule::LogCaptureDevice = nullptr;
 bool FMCPServerModule::bLogCaptureEnabled = false;
 IConsoleVariable* FMCPServerModule::LogCaptureConsoleVariable = nullptr;
 IConsoleCommand* FMCPServerModule::PrintCapturedLogsConsoleCommand = nullptr;
 
-// FStringLogOutputDevice 实现
+// FMCPLogCaptureDevice implementation
 FMCPLogCaptureDevice::FMCPLogCaptureDevice()
 	: bEnabled(false)
 {
@@ -22,7 +22,7 @@ FMCPLogCaptureDevice::FMCPLogCaptureDevice()
 
 FMCPLogCaptureDevice::~FMCPLogCaptureDevice()
 {
-	// 确保在析构时从全局日志系统中移除
+	// Ensure removal from global logging system during destruction
 	if (GLog && bEnabled)
 	{
 		GLog->RemoveOutputDevice(this);
@@ -38,7 +38,7 @@ void FMCPLogCaptureDevice::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosi
 
 	FScopeLock Lock(&LogMutex);
 	
-	// 格式化日志消息
+	// Format log message
 	FString LogMessage = FString::Printf(TEXT("[%s] %s: %s\n"), 
 		*Category.ToString(), 
 		ToString(Verbosity), 
@@ -56,7 +56,7 @@ void FMCPLogCaptureDevice::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosi
 
 	FScopeLock Lock(&LogMutex);
 	
-	// 格式化带时间戳的日志消息
+	// Format timestamped log message
 	// FDateTime DateTime = FDateTime::FromUnixTimestamp(Time);
 	// FString TimeString = DateTime.ToString(TEXT("%Y-%m-%d %H:%M:%S"));
 	
@@ -94,13 +94,11 @@ void FMCPLogCaptureDevice::SetEnabled(bool bInEnabled)
 			{
 				// 添加到全局日志系统
 				GLog->AddOutputDevice(this);
-				UE_LOG(LogMCPServer, Log, TEXT("日志捕获已启用"));
 			}
 			else
 			{
 				// 从全局日志系统移除
 				GLog->RemoveOutputDevice(this);
-				UE_LOG(LogMCPServer, Log, TEXT("日志捕获已禁用"));
 			}
 		}
 	}
@@ -122,7 +120,7 @@ void FMCPServerModule::StartupModule()
 	LogCaptureConsoleVariable = IConsoleManager::Get().RegisterConsoleVariable(
 		TEXT("MCP.LogCapture"),
 		0,
-		TEXT("0: 禁用日志捕获，1: 启用日志捕获"),
+		TEXT("0: disable log capture, 1: enable log capture"),
 		ECVF_Default
 	);
 	LogCaptureConsoleVariable->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&FMCPServerModule::OnLogCaptureConsoleVariableChanged));
@@ -130,15 +128,12 @@ void FMCPServerModule::StartupModule()
 	// 注册控制台命令
 	PrintCapturedLogsConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("MCP.PrintCapturedLogs"),
-		TEXT("打印当前捕获的所有日志内容到控制台"),
+		TEXT("print all captured logs to console"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&FMCPServerModule::PrintCapturedLogsCommand),
 		ECVF_Default
 	);
 	
-	UE_LOG(LogMCPServer, Log, TEXT("MCP Server 模块已启动，日志捕获功能可用"));
-	UE_LOG(LogMCPServer, Log, TEXT("使用控制台命令:"));
-	UE_LOG(LogMCPServer, Log, TEXT("  - 'MCP.LogCapture 1/0' 启用/禁用日志捕获"));
-	UE_LOG(LogMCPServer, Log, TEXT("  - 'MCP.PrintCapturedLogs' 打印捕获的日志"));
+	UE_LOG(LogMCPServer, Log, TEXT("MCP Server module started, log capture functionality available"));
 }
 
 void FMCPServerModule::ShutdownModule()
@@ -166,28 +161,29 @@ void FMCPServerModule::ShutdownModule()
 	
 	bLogCaptureEnabled = false;
 	
-	UE_LOG(LogMCPServer, Log, TEXT("MCP Server 模块已关闭"));
+	UE_LOG(LogMCPServer, Log, TEXT("MCP Server module shutdown"));
 }
 
 void FMCPServerModule::EnableLogCapture(bool bEnable)
 {
 	if (LogCaptureDevice.IsValid())
 	{
-		LogCaptureDevice->SetEnabled(bEnable);
-		bLogCaptureEnabled = bEnable;
-		
 		if (bEnable)
 		{
-			UE_LOG(LogMCPServer, Warning, TEXT("=== 日志捕获已启用 ==="));
+			UE_LOG(LogMCPServer, Verbose, TEXT("=== log capture enable ==="));
 		}
 		else
 		{
-			UE_LOG(LogMCPServer, Warning, TEXT("=== 日志捕获已禁用 ==="));
+			UE_LOG(LogMCPServer, Verbose, TEXT("=== log capture disable ==="));
 		}
+		LogCaptureDevice->SetEnabled(bEnable);
+		bLogCaptureEnabled = bEnable;
+		
+
 	}
 	else
 	{
-		UE_LOG(LogMCPServer, Error, TEXT("日志捕获设备未初始化"));
+		UE_LOG(LogMCPServer, Error, TEXT("Log capture device not initialized"));
 	}
 }
 
@@ -208,7 +204,7 @@ FString FMCPServerModule::GetCapturedLogs()
 		return LogCaptureDevice->GetCapturedLogs();
 	}
 	
-	return FString(TEXT("日志捕获设备未初始化"));
+	return FString(TEXT("Log capture device not initialized"));
 }
 
 void FMCPServerModule::ClearCapturedLogs()
@@ -216,7 +212,7 @@ void FMCPServerModule::ClearCapturedLogs()
 	if (LogCaptureDevice.IsValid())
 	{
 		LogCaptureDevice->ClearCapturedLogs();
-		UE_LOG(LogMCPServer, Log, TEXT("已清空捕获的日志"));
+		UE_LOG(LogMCPServer, Log, TEXT("Captured logs cleared"));
 	}
 }
 
@@ -227,7 +223,7 @@ void FMCPServerModule::OnLogCaptureConsoleVariableChanged(IConsoleVariable* Var)
 		int32 Value = Var->GetInt();
 		bool bShouldEnable = (Value != 0);
 		
-		UE_LOG(LogMCPServer, Warning, TEXT("控制台变量 MCP.LogCapture 已更改为: %d"), Value);
+		UE_LOG(LogMCPServer, Verbose, TEXT("MCP.LogCapture changed to: %d"), Value);
 		
 		// 通过现有的接口启用或禁用日志捕获
 		EnableLogCapture(bShouldEnable);
@@ -238,7 +234,7 @@ void FMCPServerModule::PrintCapturedLogsCommand(const TArray<FString>& Args)
 {
 	if (!LogCaptureDevice.IsValid())
 	{
-		UE_LOG(LogMCPServer, Error, TEXT("日志捕获设备未初始化"));
+		UE_LOG(LogMCPServer, Error, TEXT("Log capture device not initialized"));
 		return;
 	}
 	
@@ -246,8 +242,7 @@ void FMCPServerModule::PrintCapturedLogsCommand(const TArray<FString>& Args)
 	
 	if (CapturedLogs.IsEmpty())
 	{
-		UE_LOG(LogMCPServer, Warning, TEXT("=== 当前没有捕获到任何日志 ==="));
-		UE_LOG(LogMCPServer, Warning, TEXT("提示: 使用 'MCP.LogCapture 1' 启用日志捕获功能"));
+		UE_LOG(LogMCPServer, Verbose, TEXT("=== No logs currently captured ==="));
 		return;
 	}
 	
@@ -256,7 +251,7 @@ void FMCPServerModule::PrintCapturedLogsCommand(const TArray<FString>& Args)
 	CapturedLogs.ParseIntoArray(LogLines, TEXT("\n"));
 	int32 LogCount = LogLines.Num();
 	
-	UE_LOG(LogMCPServer, Warning, TEXT("=== 开始打印捕获的日志 (共 %d 行) ==="), LogCount);
+	UE_LOG(LogMCPServer, Verbose, TEXT("=== Begin printing captured logs (%d lines total) ==="), LogCount);
 	
 	// 逐行打印捕获的日志
 	for (int32 i = 0; i < LogLines.Num(); ++i)
@@ -265,17 +260,17 @@ void FMCPServerModule::PrintCapturedLogsCommand(const TArray<FString>& Args)
 		if (!Line.IsEmpty())
 		{
 			// 使用不同的日志级别来区分捕获的日志内容
-			UE_LOG(LogMCPServer, Display, TEXT("[捕获] %s"), *Line);
+			UE_LOG(LogMCPServer, Display, TEXT("%s"), *Line);
 		}
 	}
 	
-	UE_LOG(LogMCPServer, Warning, TEXT("=== 日志打印完成 ==="));
+	UE_LOG(LogMCPServer, Verbose, TEXT("=== Log printing completed ==="));
 	
 	// 如果有参数 "clear"，则打印后清空日志
 	if (Args.Num() > 0 && Args[0].ToLower() == TEXT("clear"))
 	{
 		LogCaptureDevice->ClearCapturedLogs();
-		UE_LOG(LogMCPServer, Warning, TEXT("已清空捕获的日志"));
+		UE_LOG(LogMCPServer, Verbose, TEXT("captured logs cleared"));
 	}
 }
 
