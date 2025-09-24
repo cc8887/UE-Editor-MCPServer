@@ -7,6 +7,7 @@ except ImportError:
     MCP_AVAILABLE = False
 
 class MCPServer:
+    """MCP Server implementation"""
     def __init__(self, host: str = "127.0.0.1", port: int = 8099):
         from unreal import log
         
@@ -36,17 +37,43 @@ class MCPServer:
                 name: str, arguments: dict
             ) -> list[types.TextContent]:
                 log(f"call_tool name: {name} arg:{arguments}")
-                return [types.TextContent(type="text", text="Call Tools Success")]
+                if(name == "execute_command"):
+                    # Execute in current thread
+                    try:
+                        exec(arguments['code'])
+                        return [types.TextContent(type="text", text="Success")]
+                    except SyntaxError as e:
+                        return [types.TextContent(type="text", text=f"Syntax error: {e}")]
+                return [types.TextContent(type="text", text="Failed")]
             
             @self._mcp_app.list_tools()
             async def list_tools() -> list[types.Tool]:
                 log("try list_tools")
                 return [
                     types.Tool(
-                        name="ue tools",
-                        description="UE Tools",
-                        inputSchema={"type": "object", "properties": {}}
-                    )
+                        name="execute_command",
+                        description="execute python code in unreal engine",
+                        inputSchema={"type": "object", 
+                            "properties": {
+                                "code": {
+                                    "type": "string",
+                                    "description": "python code to execute"
+                                }
+                            }
+                        }
+                    ),
+                    types.Tool(
+                        name="excute_file",
+                        description="execute python script file in unreal engine",
+                        inputSchema={"type": "object", 
+                            "properties": {
+                                "file": {
+                                    "type": "string",
+                                    "description": "python scripts file path"
+                                }
+                             }
+                        }
+                    ),
                 ]
             
             async def handle_sse(request):
@@ -70,7 +97,7 @@ class MCPServer:
             
             self._web_app = Starlette(
                 routes=[
-                    Route("/sse", endpoint=handle_sse),
+                    Route("/SSE", endpoint=handle_sse),
                     Mount("/messages/", app=self._sse.handle_post_message),
                 ]
             )
