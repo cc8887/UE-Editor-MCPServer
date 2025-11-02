@@ -72,3 +72,21 @@ void UMCPLogCaptureBlueprintLibrary::PrintCapturedLogsToConsole(bool bClearAfter
 	// 调用控制台命令函数
 	FMCPServerModule::PrintCapturedLogsCommand(Args);
 }
+
+void UMCPLogCaptureBlueprintLibrary::EnableObjectPropertyChangeListener(bool bEnable)
+{
+	if (FMCPServerModule* MCPModule = FModuleManager::GetModulePtr<FMCPServerModule>("MCPServer"))
+	{
+		MCPModule->EnableObjectPropertyChangeListener(bEnable);
+	}
+}
+
+void UMCPLogCaptureBlueprintLibrary::DisableObjectPropertyChangeListener()
+{
+	if (FMCPServerModule* MCPModule = FModuleManager::GetModulePtr<FMCPServerModule>("MCPServer"))
+	{
+		MCPModule->EnableObjectPropertyChangeListener(false);
+	}
+}
+
+

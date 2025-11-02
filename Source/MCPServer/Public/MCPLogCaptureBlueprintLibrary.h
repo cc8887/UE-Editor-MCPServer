@@ -68,4 +68,20 @@ public:
 	 */
 	UFUNCTION(BlueprintCallable, Category = "MCP|Log Capture", meta = (DisplayName = "Print Captured Logs to Console"))
 	static void PrintCapturedLogsToConsole(bool bClearAfterPrint = false);
+
+	/**
+	 * 启用或禁用对象属性变更监听器
+	 * @param bEnable 是否启用对象属性变更监听
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCP|Property Change", meta = (DisplayName = "Enable Object Property Change Listener"))
+	static void EnableObjectPropertyChangeListener(bool bEnable = true);
+
+	/**
+	 * 禁用对象属性变更监听器
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MCP|Property Change", meta = (DisplayName = "Disable Object Property Change Listener"))
+	static void DisableObjectPropertyChangeListener();
+
+
+	
 };

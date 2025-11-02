@@ -3,16 +3,83 @@
 #include "MCPServer.h"
 #include "Engine/Engine.h"
 #include "HAL/PlatformFilemanager.h"
+#include "Editor/Transactor.h"
 
 #define LOCTEXT_NAMESPACE "FMCPServerModule"
 
 DEFINE_LOG_CATEGORY(LogMCPServer);
+DEFINE_LOG_CATEGORY(LogMCPPropertyListener);
 
 // Static member variable definitions
 TSharedPtr<FMCPLogCaptureDevice> FMCPServerModule::LogCaptureDevice = nullptr;
 bool FMCPServerModule::bLogCaptureEnabled = false;
 IConsoleVariable* FMCPServerModule::LogCaptureConsoleVariable = nullptr;
 IConsoleCommand* FMCPServerModule::PrintCapturedLogsConsoleCommand = nullptr;
+
+// 从事务记录中获取原始值
+void GetOriginalValueFromTransaction(const FTransaction* Transaction, UObject* Object, const FName& PropertyName, FString& OutOriginalValue)
+{
+    // 创建临时对象来恢复原始状态
+    UObject* TempObject = DuplicateObject(Object, GetTransientPackage());
+    if (!TempObject) return;
+    
+    // 这里需要访问事务的内部记录来恢复原始状态
+    // 由于FTransaction的Records是私有的，我们需要使用反射或友元类
+    
+    FProperty* Property = Object->GetClass()->FindPropertyByName(PropertyName);
+    if (Property)
+    {
+        Property->ExportTextItem_Direct(OutOriginalValue, 
+            Property->ContainerPtrToValuePtr<void>(TempObject), 
+            nullptr, TempObject, PPF_None);
+    }
+    
+    TempObject->MarkAsGarbage();
+}
+
+// 获取属性更改前后的值
+void GetPropertyChangeValues(UObject* Object, const FName& PropertyName, FString& OutOldValue, FString& OutNewValue)
+{
+    if (!Object || !GEditor || !GEditor->Trans) return;
+    
+    // 获取最近的事务
+    const FTransaction* Transaction = GEditor->Trans->GetTransaction(GEditor->Trans->GetQueueLength() - GEditor->Trans->GetUndoCount()-1);
+    if (!Transaction) return;
+    
+    // 查找对象在事务中的记录
+    TArray<UObject*> TransactionObjects;
+    Transaction->GetTransactionObjects(TransactionObjects);
+    
+    for (UObject* TransactionObject : TransactionObjects)
+    {
+        if (TransactionObject == Object)
+        {
+            // 获取属性的当前值（更改后的值）
+            FProperty* Property = Object->GetClass()->FindPropertyByName(PropertyName);
+            if (Property)
+            {
+                Property->ExportTextItem_Direct(OutNewValue, 
+                    Property->ContainerPtrToValuePtr<void>(Object), 
+                    nullptr, Object, PPF_None);
+                
+                // 通过事务差异获取原始值
+                FTransactionDiff TransactionDiff = Transaction->GenerateDiff();
+                for (const auto& DiffPair : TransactionDiff.DiffMap)
+                {
+                    TSharedPtr<FTransactionObjectEvent> Event = DiffPair.Value;
+                    if (Event && Event->GetChangedProperties().Contains(PropertyName))
+                    {
+                        // 这里需要从事务记录中恢复原始值
+                        GetOriginalValueFromTransaction(Transaction, Object, PropertyName, OutOldValue);
+                        return;
+                    }
+                }
+            }
+            break;
+        }
+    }
+}
+
 
 // FMCPLogCaptureDevice implementation
 FMCPLogCaptureDevice::FMCPLogCaptureDevice()
@@ -116,7 +183,6 @@ void FMCPServerModule::StartupModule()
 	// 创建日志捕获设备
 	LogCaptureDevice = MakeShared<FMCPLogCaptureDevice>();
 	
-	// 注册控制台变量
 	LogCaptureConsoleVariable = IConsoleManager::Get().RegisterConsoleVariable(
 		TEXT("MCP.LogCapture"),
 		0,
@@ -125,34 +191,45 @@ void FMCPServerModule::StartupModule()
 	);
 	LogCaptureConsoleVariable->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&FMCPServerModule::OnLogCaptureConsoleVariableChanged));
 	
-	// 注册控制台命令
 	PrintCapturedLogsConsoleCommand = IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("MCP.PrintCapturedLogs"),
 		TEXT("print all captured logs to console"),
 		FConsoleCommandWithArgsDelegate::CreateStatic(&FMCPServerModule::PrintCapturedLogsCommand),
 		ECVF_Default
 	);
+
+	PropertyChangeListenerConsoleVariable =IConsoleManager::Get().RegisterConsoleVariable(
+		TEXT("MCP.EnalbeListenProperty"),
+		0,
+		TEXT("0: disable, 1: enable"),
+		ECVF_Default
+	);
 	
+	PropertyChangeListenerConsoleVariable->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&FMCPServerModule::OnPropertyChangeListenerConsoleVariableChanged));
 	UE_LOG(LogMCPServer, Log, TEXT("MCP Server module started, log capture functionality available"));
 }
 
 void FMCPServerModule::ShutdownModule()
 {
-	// 注销控制台变量
+	EnableObjectPropertyChangeListener(false);
+	if (PropertyChangeListenerConsoleVariable)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(PropertyChangeListenerConsoleVariable);
+		PropertyChangeListenerConsoleVariable = nullptr;
+	}
+	
 	if (LogCaptureConsoleVariable)
 	{
 		IConsoleManager::Get().UnregisterConsoleObject(LogCaptureConsoleVariable);
 		LogCaptureConsoleVariable = nullptr;
 	}
 	
-	// 注销控制台命令
 	if (PrintCapturedLogsConsoleCommand)
 	{
 		IConsoleManager::Get().UnregisterConsoleObject(PrintCapturedLogsConsoleCommand);
 		PrintCapturedLogsConsoleCommand = nullptr;
 	}
 	
-	// 清理日志捕获设备
 	if (LogCaptureDevice.IsValid())
 	{
 		LogCaptureDevice->SetEnabled(false);
@@ -160,7 +237,6 @@ void FMCPServerModule::ShutdownModule()
 	}
 	
 	bLogCaptureEnabled = false;
-	
 	UE_LOG(LogMCPServer, Log, TEXT("MCP Server module shutdown"));
 }
 
@@ -216,6 +292,34 @@ void FMCPServerModule::ClearCapturedLogs()
 	}
 }
 
+void FMCPServerModule::EnableObjectPropertyChangeListener(bool Enable)
+{
+	if (Enable)
+	{
+		if (OnObjectTransactedHandle.IsValid())
+		{
+			FCoreUObjectDelegates::OnObjectTransacted.Remove(OnObjectTransactedHandle);
+		}
+		OnObjectTransactedHandle = FCoreUObjectDelegates::OnObjectTransacted.AddLambda([](UObject* Obj, const FTransactionObjectEvent& Event)
+		{
+			auto PropertiesNames = Event.GetChangedProperties();
+			for (auto Name: PropertiesNames)
+			{
+				FString OldValue;
+				FString NewValue;
+				GetPropertyChangeValues(Obj,Name,OldValue,NewValue);
+				UE_LOG(LogMCPPropertyListener, Log, TEXT("Property:%s,OldValue:%s,NewValue:%s"),*Name.ToString(),*OldValue,*NewValue);
+			}
+			
+		});
+	}
+	else
+	{
+		FCoreUObjectDelegates::OnObjectTransacted.Remove(OnObjectTransactedHandle);
+		OnObjectTransactedHandle.Reset();
+	}
+}
+
 void FMCPServerModule::OnLogCaptureConsoleVariableChanged(IConsoleVariable* Var)
 {
 	if (Var)
@@ -227,6 +331,20 @@ void FMCPServerModule::OnLogCaptureConsoleVariableChanged(IConsoleVariable* Var)
 		
 		// 通过现有的接口启用或禁用日志捕获
 		EnableLogCapture(bShouldEnable);
+	}
+}
+
+void FMCPServerModule::OnPropertyChangeListenerConsoleVariableChanged(IConsoleVariable* Var)
+{
+	if (Var)
+	{
+		int32 Value = Var->GetInt();
+		bool bShouldEnable = (Value != 0);
+		
+		if (FMCPServerModule* MCPModule = FModuleManager::GetModulePtr<FMCPServerModule>("MCPServer"))
+		{
+			MCPModule->EnableObjectPropertyChangeListener(bShouldEnable);
+		}
 	}
 }
 

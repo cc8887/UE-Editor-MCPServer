@@ -9,6 +9,7 @@
 
 // 声明 MCP Server 插件专属的日志分类
 DECLARE_LOG_CATEGORY_EXTERN(LogMCPServer, Log, All);
+DECLARE_LOG_CATEGORY_EXTERN(LogMCPPropertyListener, Log, All);
 
 /**
  * 自定义日志输出设备，用于捕获 UE_LOG 输出到字符串
@@ -56,9 +57,10 @@ public:
 	static FString GetCapturedLogs();
 	static void ClearCapturedLogs();
 
-	// 控制台变量回调函数
+	void EnableObjectPropertyChangeListener(bool Enable);
 	static void OnLogCaptureConsoleVariableChanged(IConsoleVariable* Var);
-
+	static void OnPropertyChangeListenerConsoleVariableChanged(IConsoleVariable* Var);
+	
 	// 控制台命令函数
 	static void PrintCapturedLogsCommand(const TArray<FString>& Args);
 
@@ -67,4 +69,12 @@ private:
 	static bool bLogCaptureEnabled;
 	static IConsoleVariable* LogCaptureConsoleVariable;
 	static IConsoleCommand* PrintCapturedLogsConsoleCommand;
+	IConsoleVariable* PropertyChangeListenerConsoleVariable = nullptr;
+	static bool bPropertyChangeListenerEnabled;
+	
+	// 属性值缓存：对象 -> 属性名 -> 属性值
+	static TMap<TWeakObjectPtr<UObject>, TMap<FName, FString>> PropertyValueCache;
+	static FCriticalSection PropertyCacheMutex;
+	
+	FDelegateHandle OnObjectTransactedHandle;
 };
