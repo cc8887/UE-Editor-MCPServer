@@ -16,6 +16,15 @@ ENV/
 env.bak/
 venv.bak/
 
+# Content/Python - Ignore all third-party dependencies
+# Only track core project files
+Content/Python/*
+!Content/Python/CustomEventLoop.py
+!Content/Python/init_unreal.py
+!Content/Python/Manager.py
+!Content/Python/MCPServer.py
+!Content/Python/Start.py
+
 # IDE related
 .vs/
 .vscode/
