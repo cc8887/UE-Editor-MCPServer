@@ -163,3 +163,13 @@ FString FMCPBlueprintObjectFilter::GetFilterDescription() const
 {
 	return TEXT("Blueprint Object Filter (removes UBlueprint asset changes, keeps instance changes)");
 }
+
+bool FMCPBlueprintVisiblePropertyFilter::FilterSingleObject(FMCPObjectDiff& InOutObjectDiff) const
+{
+	return FMCPTeachingDataFilterBase::FilterSingleObject(InOutObjectDiff);
+}
+
+FString FMCPBlueprintVisiblePropertyFilter::GetFilterDescription() const
+{
+	return TEXT("Blueprint Visible Property Filter");
+}
