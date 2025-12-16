@@ -25,7 +25,11 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "MCP|ObjectDump")
 	static FString DumpBlueprintProperties(const FString& PackagePath, bool bBlueprintVisibleOnly = false, bool bModifiedOnly = false);
 
-private:
+	/**
+	 * Export a single property value to text using the same formatting as DumpPropertyValue
+	 */
+	static FString ExportPropertyValueToText(FProperty* Property, const void* ValuePtr, bool bBlueprintVisibleOnly = false, bool bModifiedOnly = false, const void* DefaultValuePtr = nullptr);
+	
 	/**
 	 * Recursively dump a single property value
 	 * @param Property The property to dump
@@ -77,6 +81,13 @@ private:
 	 * @return true if the property is visible in Blueprint
 	 */
 	static bool IsBlueprintVisible(const FProperty* Property);
+
+	/**
+	 * Check if a property is editable/writable in Blueprint editor
+	 * @param Property The property to check
+	 * @return true if the property can be modified in Blueprint
+	 */
+	static bool IsBlueprintEditable(const FProperty* Property);
 
 	/**
 	 * Check if a property value differs from its default value

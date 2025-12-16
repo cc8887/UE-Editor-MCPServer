@@ -1,9 +1,13 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MCPServer.h"
+#include "MCPTeachingSessionManager.h"
 #include "Engine/Engine.h"
 #include "HAL/PlatformFilemanager.h"
 #include "Editor/Transactor.h"
+#include "Runtime/Launch/Resources/Version.h"
+#include "Misc/ITransaction.h"
+#include "Misc/OutputDeviceHelper.h"
 
 #define LOCTEXT_NAMESPACE "FMCPServerModule"
 
@@ -29,12 +33,22 @@ void GetOriginalValueFromTransaction(const FTransaction* Transaction, UObject* O
     FProperty* Property = Object->GetClass()->FindPropertyByName(PropertyName);
     if (Property)
     {
+#if ENGINE_MAJOR_VERSION >= 5
         Property->ExportTextItem_Direct(OutOriginalValue, 
             Property->ContainerPtrToValuePtr<void>(TempObject), 
             nullptr, TempObject, PPF_None);
+#else
+        Property->ExportTextItem(OutOriginalValue, 
+            Property->ContainerPtrToValuePtr<void>(TempObject), 
+            nullptr, TempObject, PPF_None);
+#endif
     }
     
+#if ENGINE_MAJOR_VERSION >= 5
     TempObject->MarkAsGarbage();
+#else
+    TempObject->MarkPendingKill();
+#endif
 }
 
 // 获取属性更改前后的值
@@ -58,11 +72,18 @@ void GetPropertyChangeValues(UObject* Object, const FName& PropertyName, FString
             FProperty* Property = Object->GetClass()->FindPropertyByName(PropertyName);
             if (Property)
             {
+#if ENGINE_MAJOR_VERSION >= 5
                 Property->ExportTextItem_Direct(OutNewValue, 
                     Property->ContainerPtrToValuePtr<void>(Object), 
                     nullptr, Object, PPF_None);
+#else
+                Property->ExportTextItem(OutNewValue, 
+                    Property->ContainerPtrToValuePtr<void>(Object), 
+                    nullptr, Object, PPF_None);
+#endif
                 
-                // 通过事务差异获取原始值
+#if ENGINE_MAJOR_VERSION >= 5
+                // 通过事务差异获取原始值（UE5.0+ 提供 FTransactionDiff/FTransactionObjectEvent）
                 FTransactionDiff TransactionDiff = Transaction->GenerateDiff();
                 for (const auto& DiffPair : TransactionDiff.DiffMap)
                 {
@@ -74,6 +95,11 @@ void GetPropertyChangeValues(UObject* Object, const FName& PropertyName, FString
                         return;
                     }
                 }
+#else
+                // UE4.27 中没有 FTransactionDiff/FTransactionObjectEvent，这里无法可靠拿到旧值
+                // 给调用方一个占位提示，避免编译错误
+                OutOldValue = TEXT("<Not supported on UE4.27>");
+#endif
             }
             break;
         }
@@ -106,9 +132,16 @@ void FMCPLogCaptureDevice::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosi
 	FScopeLock Lock(&LogMutex);
 	
 	// Format log message
+	const TCHAR* VerbosityString =
+#if ENGINE_MAJOR_VERSION >= 5
+		ToString(Verbosity);
+#else
+		FOutputDeviceHelper::VerbosityToString(Verbosity);
+#endif
+
 	FString LogMessage = FString::Printf(TEXT("[%s] %s: %s\n"), 
 		*Category.ToString(), 
-		ToString(Verbosity), 
+		VerbosityString, 
 		V);
 	
 	CapturedLogs += LogMessage;
@@ -127,9 +160,16 @@ void FMCPLogCaptureDevice::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosi
 	// FDateTime DateTime = FDateTime::FromUnixTimestamp(Time);
 	// FString TimeString = DateTime.ToString(TEXT("%Y-%m-%d %H:%M:%S"));
 	
+	const TCHAR* VerbosityString =
+#if ENGINE_MAJOR_VERSION >= 5
+		ToString(Verbosity);
+#else
+		FOutputDeviceHelper::VerbosityToString(Verbosity);
+#endif
+
 	FString LogMessage = FString::Printf(TEXT("[%s] %s: %s\n"), 
 		*Category.ToString(), 
-		ToString(Verbosity), 
+		VerbosityString, 
 		V);
 	
 	CapturedLogs += LogMessage;
@@ -182,6 +222,7 @@ void FMCPServerModule::StartupModule()
 {
 	// 创建日志捕获设备
 	LogCaptureDevice = MakeShared<FMCPLogCaptureDevice>();
+	TeachingSessionManager = MakeShared<FMCPTeachingSessionManager>();
 	
 	LogCaptureConsoleVariable = IConsoleManager::Get().RegisterConsoleVariable(
 		TEXT("MCP.LogCapture"),
@@ -206,16 +247,41 @@ void FMCPServerModule::StartupModule()
 	);
 	
 	PropertyChangeListenerConsoleVariable->SetOnChangedCallback(FConsoleVariableDelegate::CreateStatic(&FMCPServerModule::OnPropertyChangeListenerConsoleVariableChanged));
+	
+	StartTeachingCommand = IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("MCP.StartTeaching"),
+		TEXT("Start recording a MCP teaching session"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&FMCPServerModule::StartTeachingConsoleCommand),
+		ECVF_Default);
+
+	StopTeachingCommand = IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("MCP.StopTeaching"),
+		TEXT("Stop the current MCP teaching session"),
+		FConsoleCommandWithArgsDelegate::CreateStatic(&FMCPServerModule::StopTeachingConsoleCommand),
+		ECVF_Default);
 	UE_LOG(LogMCPServer, Log, TEXT("MCP Server module started, log capture functionality available"));
 }
 
 void FMCPServerModule::ShutdownModule()
 {
 	EnableObjectPropertyChangeListener(false);
+	TeachingSessionManager.Reset();
 	if (PropertyChangeListenerConsoleVariable)
 	{
 		IConsoleManager::Get().UnregisterConsoleObject(PropertyChangeListenerConsoleVariable);
 		PropertyChangeListenerConsoleVariable = nullptr;
+	}
+	
+	if (StartTeachingCommand)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(StartTeachingCommand);
+		StartTeachingCommand = nullptr;
+	}
+	
+	if (StopTeachingCommand)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(StopTeachingCommand);
+		StopTeachingCommand = nullptr;
 	}
 	
 	if (LogCaptureConsoleVariable)
@@ -300,6 +366,7 @@ void FMCPServerModule::EnableObjectPropertyChangeListener(bool Enable)
 		{
 			FCoreUObjectDelegates::OnObjectTransacted.Remove(OnObjectTransactedHandle);
 		}
+#if ENGINE_MAJOR_VERSION >= 5
 		OnObjectTransactedHandle = FCoreUObjectDelegates::OnObjectTransacted.AddLambda([](UObject* Obj, const FTransactionObjectEvent& Event)
 		{
 			auto PropertiesNames = Event.GetChangedProperties();
@@ -310,8 +377,15 @@ void FMCPServerModule::EnableObjectPropertyChangeListener(bool Enable)
 				GetPropertyChangeValues(Obj,Name,OldValue,NewValue);
 				UE_LOG(LogMCPPropertyListener, Log, TEXT("Property:%s,OldValue:%s,NewValue:%s"),*Name.ToString(),*OldValue,*NewValue);
 			}
-			
 		});
+#else
+		// UE4.27 的 OnObjectTransacted 也使用 FTransactionObjectEvent，但旧版本缺乏属性 diff 支持时仅做对象级日志
+		OnObjectTransactedHandle = FCoreUObjectDelegates::OnObjectTransacted.AddLambda([](UObject* Obj, const FTransactionObjectEvent& Event)
+		{
+			UE_LOG(LogMCPPropertyListener, Log, TEXT("Object transacted: %s (%s), EventType=%d"),
+				*Obj->GetName(), *Obj->GetClass()->GetName(), static_cast<int32>(Event.GetEventType()));
+		});
+#endif
 	}
 	else
 	{
@@ -389,6 +463,74 @@ void FMCPServerModule::PrintCapturedLogsCommand(const TArray<FString>& Args)
 	{
 		LogCaptureDevice->ClearCapturedLogs();
 		UE_LOG(LogMCPServer, Verbose, TEXT("captured logs cleared"));
+	}
+}
+
+void FMCPServerModule::StartTeachingConsoleCommand(const TArray<FString>& Args)
+{
+	if (FMCPServerModule* Module = FModuleManager::GetModulePtr<FMCPServerModule>("MCPServer"))
+	{
+		Module->StartTeachingSession();
+	}
+}
+
+void FMCPServerModule::StopTeachingConsoleCommand(const TArray<FString>& Args)
+{
+	if (FMCPServerModule* Module = FModuleManager::GetModulePtr<FMCPServerModule>("MCPServer"))
+	{
+		Module->StopTeachingSession();
+	}
+}
+
+void FMCPServerModule::StartTeachingSession()
+{
+	if (!TeachingSessionManager.IsValid())
+	{
+		TeachingSessionManager = MakeShared<FMCPTeachingSessionManager>();
+	}
+
+	if (!TeachingSessionManager->IsSessionActive())
+	{
+		TeachingSessionManager->StartTeachingSession();
+	}
+	else
+	{
+		UE_LOG(LogMCPServer, Warning, TEXT("Teaching session already active"));
+	}
+}
+
+void FMCPServerModule::StopTeachingSession()
+{
+	if (!TeachingSessionManager.IsValid())
+	{
+		UE_LOG(LogMCPServer, Warning, TEXT("Teaching session manager is not initialized"));
+		return;
+	}
+
+	if (TeachingSessionManager->IsSessionActive())
+	{
+		TeachingSessionManager->StopTeachingSession();
+	}
+	else
+	{
+		UE_LOG(LogMCPServer, Warning, TEXT("Teaching session is not running"));
+	}
+}
+
+void FMCPServerModule::RecordTeachingEvent(FName EventName, const FString& Payload)
+{
+	if (!TeachingSessionManager.IsValid())
+	{
+		TeachingSessionManager = MakeShared<FMCPTeachingSessionManager>();
+	}
+
+	if (TeachingSessionManager->IsSessionActive())
+	{
+		TeachingSessionManager->RecordCustomEvent(EventName, Payload);
+	}
+	else
+	{
+		UE_LOG(LogMCPServer, Verbose, TEXT("Teaching event %s skipped because no session is active"), *EventName.ToString());
 	}
 }
 

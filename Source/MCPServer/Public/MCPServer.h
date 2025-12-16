@@ -7,6 +7,8 @@
 #include "Misc/OutputDevice.h"
 #include "HAL/IConsoleManager.h"
 
+class FMCPTeachingSessionManager;
+
 // 声明 MCP Server 插件专属的日志分类
 DECLARE_LOG_CATEGORY_EXTERN(LogMCPServer, Log, All);
 DECLARE_LOG_CATEGORY_EXTERN(LogMCPPropertyListener, Log, All);
@@ -63,6 +65,13 @@ public:
 	
 	// 控制台命令函数
 	static void PrintCapturedLogsCommand(const TArray<FString>& Args);
+	static void StartTeachingConsoleCommand(const TArray<FString>& Args);
+	static void StopTeachingConsoleCommand(const TArray<FString>& Args);
+
+	TSharedPtr<FMCPTeachingSessionManager> GetTeachingSessionManager() const { return TeachingSessionManager; }
+	void StartTeachingSession();
+	void StopTeachingSession();
+	void RecordTeachingEvent(FName EventName, const FString& Payload);
 
 private:
 	static TSharedPtr<FMCPLogCaptureDevice> LogCaptureDevice;
@@ -71,10 +80,13 @@ private:
 	static IConsoleCommand* PrintCapturedLogsConsoleCommand;
 	IConsoleVariable* PropertyChangeListenerConsoleVariable = nullptr;
 	static bool bPropertyChangeListenerEnabled;
-	
+	IConsoleCommand* StartTeachingCommand = nullptr;
+	IConsoleCommand* StopTeachingCommand = nullptr;
+
 	// 属性值缓存：对象 -> 属性名 -> 属性值
 	static TMap<TWeakObjectPtr<UObject>, TMap<FName, FString>> PropertyValueCache;
 	static FCriticalSection PropertyCacheMutex;
 	
 	FDelegateHandle OnObjectTransactedHandle;
+	TSharedPtr<FMCPTeachingSessionManager> TeachingSessionManager;
 };

@@ -5,9 +5,11 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "UObject/UnrealType.h"
 #include "UObject/PropertyIterator.h"
+#include "Runtime/Launch/Resources/Version.h"
 
 FString UMCPObjectInformDumpLibrary::GetIndent(int32 Indent)
 {
+	Indent = FMath::Max(Indent, 0);
 	return FString::ChrN(Indent * 2, TEXT(' '));
 }
 
@@ -26,6 +28,42 @@ bool UMCPObjectInformDumpLibrary::IsBlueprintVisible(const FProperty* Property)
 		CPF_BlueprintCallable;        // Blueprint callable delegates
 
 	return Property->HasAnyPropertyFlags(BlueprintVisibleFlags);
+}
+
+bool UMCPObjectInformDumpLibrary::IsBlueprintEditable(const FProperty* Property)
+{
+	if (!Property)
+	{
+		return false;
+	}
+
+	// 首先检查只读标记，这些标记表示属性不可编辑
+	const EPropertyFlags ReadOnlyFlags = 
+		CPF_EditConst |               // VisibleAnywhere, VisibleDefaultsOnly, VisibleInstanceOnly 等
+		CPF_BlueprintReadOnly |       // 蓝图只读
+		CPF_DisableEditOnInstance |   // 实例上不可编辑
+		CPF_DisableEditOnTemplate;    // 模板上不可编辑
+
+	// 如果有任何只读标记，直接返回false
+	if (Property->HasAnyPropertyFlags(ReadOnlyFlags))
+	{
+		return false;
+	}
+
+	// 检查是否有可编辑标记
+	// CPF_Edit: EditAnywhere, EditDefaultsOnly, EditInstanceOnly
+	// CPF_BlueprintVisible: BlueprintReadWrite (当没有CPF_BlueprintReadOnly时)
+	const EPropertyFlags EditableFlags = 
+		CPF_Edit |                    
+		CPF_BlueprintVisible;
+
+	// 必须至少有一个可编辑标记
+	if (!Property->HasAnyPropertyFlags(EditableFlags))
+	{
+		return false;
+	}
+
+	return true;
 }
 
 bool UMCPObjectInformDumpLibrary::IsPropertyModified(const FProperty* Property, const void* ValuePtr, const void* DefaultValuePtr)
@@ -96,6 +134,17 @@ FString UMCPObjectInformDumpLibrary::DumpBlueprintProperties(const FString& Pack
 	return Result;
 }
 
+FString UMCPObjectInformDumpLibrary::ExportPropertyValueToText(FProperty* Property, const void* ValuePtr, bool bBlueprintVisibleOnly, bool bModifiedOnly, const void* DefaultValuePtr)
+{
+	if (!Property || !ValuePtr)
+	{
+		return TEXT("<null>");
+	}
+
+	TSet<const UObject*> DummyVisited;
+	return DumpPropertyValue(Property, ValuePtr, 0, DummyVisited, bBlueprintVisibleOnly, bModifiedOnly, DefaultValuePtr);
+}
+
 FString UMCPObjectInformDumpLibrary::DumpObjectProperties(const UObject* Object, int32 Indent, TSet<const UObject*>& VisitedObjects, bool bBlueprintVisibleOnly, bool bModifiedOnly, const UObject* DefaultObject)
 {
 	if (!Object)
@@ -124,7 +173,7 @@ FString UMCPObjectInformDumpLibrary::DumpStructProperties(const UStruct* Struct,
 		FProperty* Property = *PropIt;
 		
 		// Check Blueprint visibility filter
-		if (bBlueprintVisibleOnly && !IsBlueprintVisible(Property))
+		if (bBlueprintVisibleOnly && !IsBlueprintEditable(Property))
 		{
 			continue;
 		}
@@ -464,7 +513,11 @@ FString UMCPObjectInformDumpLibrary::DumpPropertyValue(FProperty* Property, cons
 	{
 		// Fallback: Use ExportTextItem to get string representation
 		FString ExportedValue;
+#if ENGINE_MAJOR_VERSION >= 5
 		Property->ExportTextItem_Direct(ExportedValue, ValuePtr, ValuePtr, nullptr, PPF_None);
+#else
+		Property->ExportTextItem(ExportedValue, ValuePtr, ValuePtr, nullptr, PPF_None);
+#endif
 		return ExportedValue;
 	}
 
