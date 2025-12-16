@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 import time
 from unreal import log
 
@@ -19,7 +19,7 @@ class Manager:
 
     def __init__(self):
         log("Manager init")
-        from CustomEventLoop import WinCustomEventLoop
+        from .CustomEventLoop import WinCustomEventLoop
         self._loop = WinCustomEventLoop()
         asyncio.set_event_loop(self._loop)
         self._loop.slow_callback_duration = 0

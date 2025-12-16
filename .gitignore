@@ -16,14 +16,24 @@ ENV/
 env.bak/
 venv.bak/
 
+# Environment configuration (contains local settings)
+.env
+
 # Content/Python - Ignore all third-party dependencies
 # Only track core project files
 Content/Python/*
-!Content/Python/CustomEventLoop.py
 !Content/Python/init_unreal.py
-!Content/Python/Manager.py
-!Content/Python/MCPServer.py
-!Content/Python/Start.py
+!Content/Python/mcp_server/
+Content/Python/mcp_server/*
+!Content/Python/mcp_server/__init__.py
+!Content/Python/mcp_server/CustomEventLoop.py
+!Content/Python/mcp_server/Manager.py
+!Content/Python/mcp_server/MCPConfig.py
+!Content/Python/mcp_server/MCPCore.py
+!Content/Python/mcp_server/MCPForwarder.py
+!Content/Python/mcp_server/MCPServer.py
+!Content/Python/mcp_server/MCPStandalone.py
+!Content/Python/mcp_server/Start.py
 
 # IDE related
 .vs/
