@@ -48,6 +48,14 @@ except ImportError:
     )
     from MCPConfig import load_config, get_mcp_port, get_mcp_host, get_editor_port, get_editor_host
 
+# CORS中间件
+try:
+    from starlette.middleware import Middleware
+    from starlette.middleware.cors import CORSMiddleware
+    CORS_AVAILABLE = True
+except ImportError:
+    CORS_AVAILABLE = False
+
 
 class EditorState(Enum):
     """编辑器连接状态"""
@@ -536,11 +544,28 @@ class MCPStandaloneServer:
                     print(f"[MCPServer] MCP server error: {e}")
                     raise
         
+        # 配置CORS中间件
+        middleware = []
+        if CORS_AVAILABLE:
+            middleware.append(
+                Middleware(
+                    CORSMiddleware,
+                    allow_origins=["*"],
+                    allow_credentials=True,
+                    allow_methods=["*"],
+                    allow_headers=["*"],
+                )
+            )
+            print("[MCPServer] CORS middleware enabled")
+        else:
+            print("[MCPServer] WARNING: CORS middleware not available")
+        
         web_app = Starlette(
             routes=[
                 Route("/SSE", endpoint=handle_sse),
                 Mount("/messages/", app=sse.handle_post_message),
-            ]
+            ],
+            middleware=middleware
         )
         
         # 启动重连循环
