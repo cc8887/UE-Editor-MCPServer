@@ -26,7 +26,7 @@
 
 namespace
 {
-	TObjectPtr<class UTransactor> GetTransBuffer()
+	UTransactor* GetTransBuffer()
 	{
 		return GEditor ? GEditor->Trans : nullptr;
 	}
