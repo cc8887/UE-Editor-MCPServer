@@ -1,9 +1,11 @@
 ﻿from asyncio import ProactorEventLoop
+import time
+import traceback
 
 
 
 class WinCustomEventLoop(ProactorEventLoop):
-    def __init__(self, proactor=None):
+    def __init__(self, proactor=None, debug: bool = False):
         super().__init__(proactor)
         self.stop()
         self._pending_stop = False
@@ -13,6 +15,12 @@ class WinCustomEventLoop(ProactorEventLoop):
         self._is_new_task = False
         self._handle = None
         self._old_agen_hooks = None
+        self._in_tick = False
+        self.debug = debug
+        self._last_reentry_warning_time = 0.0
+
+    def set_debug(self, enabled: bool = True):
+        self.debug = enabled
 
     def run_until_complete(self, future):
         from asyncio import futures
@@ -65,19 +73,37 @@ class WinCustomEventLoop(ProactorEventLoop):
         except Exception as ex:
             self._pending_stop = True
     def tick(self):
+        if self._in_tick:
+            if self.debug:
+                now = time.time()
+                if now - self._last_reentry_warning_time >= 1.0:
+                    self._last_reentry_warning_time = now
+                    stack = "".join(traceback.format_stack(limit=25))
+                    try:
+                        from unreal import log_warning
+                        log_warning("[MCP] WinCustomEventLoop.tick re-entered; skipping nested tick\n" + stack)
+                    except Exception:
+                        print("[MCP] WinCustomEventLoop.tick re-entered; skipping nested tick\n" + stack)
+            return
+        self._in_tick = True
         if self._stopping:
+            self._in_tick = False
             return
         if self._pending_stop:
             self._stopping = True
             self.on_tick_end()
+            self._in_tick = False
             return
         try:
             self._run_once()
             if self._stopping:
                 self.on_tick_end()
+                self._in_tick = False
                 return
         except Exception as ex:
             self._pending_stop = True
+        finally:
+            self._in_tick = False
     def on_tick_end(self):
         import sys
         from asyncio import events
