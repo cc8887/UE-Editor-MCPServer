@@ -42,6 +42,7 @@ public class MCPServer : ModuleRules
 				"SlateCore",
 				"UnrealEd",
 				"Kismet",
+				"GameplayTags",
 				// ... add private dependencies that you statically link with here ...	
 			}
 		);
