@@ -6,6 +6,9 @@ import traceback
 
 class WinCustomEventLoop(ProactorEventLoop):
     def __init__(self, proactor=None, debug: bool = False):
+        # asyncio internals (e.g. BaseEventLoop.call_soon) rely on self._debug
+        # potentially during base __init__ (UE4.27 Python 3.7 proactor loop).
+        self._debug = bool(debug)
         super().__init__(proactor)
         self.stop()
         self._pending_stop = False
@@ -16,10 +19,15 @@ class WinCustomEventLoop(ProactorEventLoop):
         self._handle = None
         self._old_agen_hooks = None
         self._in_tick = False
-        self.debug = debug
+        self.debug = bool(debug)
         self._last_reentry_warning_time = 0.0
 
     def set_debug(self, enabled: bool = True):
+        enabled = bool(enabled)
+        try:
+            super().set_debug(enabled)
+        except Exception:
+            self._debug = enabled
         self.debug = enabled
 
     def run_until_complete(self, future):
