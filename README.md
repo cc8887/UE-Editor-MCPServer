@@ -17,7 +17,8 @@ python新手，欢迎大佬们提各种建议
 
 ## How To Use
 
-目前仅提供了示例版本的MCPServer，若想添加功能在.Content/Python/MCPServer.py中修改即可
+目前仅提供了示例版本的MCPServer，若想扩展功能请修改 `Content/Python/mcp_server/` 目录下的脚本（主要入口为 `MCPStandalone.py`、`MCPServer.py`）
+
 
 ## UE4 使用指南
 
@@ -121,6 +122,18 @@ Start.start()
 
 本节介绍如何在主流 MCP 客户端中配置 UE-Editor-MCPServer。
 
+### MCP 配置
+```json
+{
+  "mcpServers": {
+    "ue-editor": {
+      "url": "http://127.0.0.1:8099/SSE",
+      "description": "UE Editor MCP Server - Enables AI agents to automate UE4/UE5 development through Python scripting"
+    }
+  }
+}
+```
+
 ### 前置条件
 
 确保你已经完成以下步骤：
@@ -129,161 +142,7 @@ Start.start()
 - （UE4用户）独立 MCP 服务器已运行（`python main.py`）
 - 服务器正在监听 `127.0.0.1:8099`（默认端口）
 
-### 支持的客户端
 
-#### 1. Claude Desktop
-
-Claude Desktop 是 Anthropic 官方的桌面应用，原生支持 MCP 协议。
-
-**配置步骤：**
-
-1. 找到 Claude Desktop 的配置文件：
-   
-   - **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-   - **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-   - **Linux**: `~/.config/Claude/claude_desktop_config.json`
-
-2. 编辑配置文件，添加 `mcpServers` 配置：
-
-```json
-{
-  "mcpServers": {
-    "ue-editor": {
-      "url": "http://127.0.0.1:8099/sse"
-    }
-  }
-}
-```
-
-如果需要自定义端口，修改 `url` 中的端口号：
-
-```json
-{
-  "mcpServers": {
-    "ue-editor": {
-      "url": "http://127.0.0.1:自定义端口/sse"
-    }
-  }
-}
-```
-
-3. 保存配置文件并重启 Claude Desktop
-
-4. 连接成功后，在对话中可以看到 `ue-editor` 服务器及其提供的工具
-
-**可用工具示例：**
-
-- `execute_python` - 在 UE 编辑器中执行 Python 代码
-- `execute_python_file` - 执行 Python 脚本文件
-- `get_logs` - 获取编辑器日志
-
-#### 2. Cursor
-
-Cursor 是基于 VSCode 的 AI 编辑器，支持通过扩展连接 MCP 服务器。
-
-**配置步骤（方法一：使用 MCP 扩展）：**
-
-1. 在 Cursor 中安装 MCP 客户端扩展（如果可用）
-
-2. 打开设置（`Ctrl+,` 或 `Cmd+,`），搜索 "MCP"
-
-3. 添加服务器配置：
-
-```json
-{
-  "mcp.servers": [
-    {
-      "name": "ue-editor",
-      "url": "http://127.0.0.1:8099/sse"
-    }
-  ]
-}
-```
-
-**配置步骤（方法二：直接使用 HTTP 请求）：**
-
-在 Cursor 中，你也可以通过编写脚本直接向 MCP 服务器发送请求：
-
-```typescript
-// 示例：调用 execute_python 工具
-const response = await fetch('http://127.0.0.1:8099/call-tool', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    name: 'execute_python',
-    arguments: {
-      code: 'import unreal; print(unreal.EditorLevelLibrary.get_all_level_actors())'
-    }
-  })
-});
-
-const result = await response.json();
-console.log(result);
-```
-
-#### 3. Continue.dev
-
-Continue 是一个开源的 AI 代码助手，支持自定义 MCP 服务器。
-
-**配置步骤：**
-
-1. 打开 Continue 配置文件（通常在 `~/.continue/config.json`）
-
-2. 在 `mcpServers` 部分添加：
-
-```json
-{
-  "mcpServers": [
-    {
-      "name": "ue-editor",
-      "transport": {
-        "type": "sse",
-        "url": "http://127.0.0.1:8099/sse"
-      }
-    }
-  ]
-}
-```
-
-3. 重启 Continue 扩展
-
-#### 4. 自定义客户端（通用配置）
-
-如果你正在开发自己的 MCP 客户端，可以使用以下信息连接到服务器：
-
-**连接信息：**
-
-- **协议**: SSE (Server-Sent Events)
-- **端点**: `http://127.0.0.1:8099/sse`
-- **调用工具**: `POST http://127.0.0.1:8099/call-tool`
-
-**请求格式示例：**
-
-```http
-POST /call-tool HTTP/1.1
-Host: 127.0.0.1:8099
-Content-Type: application/json
-
-{
-  "name": "execute_python",
-  "arguments": {
-    "code": "import unreal; print('Hello from UE!')"
-  }
-}
-```
-
-**响应格式示例：**
-
-```json
-{
-  "content": [
-    {
-      "type": "text",
-      "text": "Hello from UE!\n执行成功"
-    }
-  ]
-}
-```
 
 ### 验证连接
 
@@ -361,31 +220,14 @@ EDITOR_PORT=8200
 {
   "mcpServers": {
     "ue-project-a": {
-      "url": "http://127.0.0.1:8099/sse"
+      "url": "http://127.0.0.1:8099/SSE"
+
     },
     "ue-project-b": {
-      "url": "http://127.0.0.1:8199/sse"
+      "url": "http://127.0.0.1:8199/SSE"
     }
+
   }
 }
 ```
 
-#### 远程访问（高级）
-
-默认配置仅允许本地访问（`127.0.0.1`）。如需远程访问：
-
-1. 修改 `.env` 中的 `MCP_HOST`：
-
-```ini
-MCP_HOST=0.0.0.0  # 监听所有网络接口
-```
-
-2. 配置防火墙规则允许外部访问
-
-3. **安全警告**：远程访问会带来安全风险，请仅在受信任的网络环境中使用，并考虑添加身份验证机制
-
-### 推荐客户端
-
-- **最佳体验**: Claude Desktop（原生支持，配置简单）
-- **开发者友好**: Cursor / Continue（集成开发环境）
-- **自定义需求**: 自行开发客户端（使用 MCP SDK）
