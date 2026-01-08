@@ -156,6 +156,25 @@ TOOL_GET_EDITOR_STATE = ToolDefinition(
     }
 )
 
+TOOL_GET_IMPORTED_MODULES = ToolDefinition(
+    name="get_imported_modules",
+    description="Get all imported modules in the current Unreal Editor Python environment. Returns a list of module names and generates import statements for type checking (e.g., mypy).",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "include_stdlib": {
+                "type": "boolean",
+                "description": "Include standard library modules (default: false). If false, only returns third-party and editor-specific modules."
+            },
+            "format": {
+                "type": "string",
+                "description": "Output format: 'list' (module names only), 'imports' (import statements), or 'both' (default: 'both')",
+                "enum": ["list", "imports", "both"]
+            }
+        }
+    }
+)
+
 # 默认工具列表
 DEFAULT_TOOLS = [TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE]
 
@@ -234,6 +253,101 @@ class CodeExecutor:
         except (ImportError, AttributeError):
             pass
         return None
+    
+    @staticmethod
+    def get_imported_modules(include_stdlib: bool = False, output_format: str = "imports") -> ExecutionResult:
+        """
+        获取当前Python环境中已导入的所有模块
+        
+        Args:
+            include_stdlib: 是否包含标准库模块（默认False，只返回第三方和编辑器特定模块）
+            output_format: 输出格式 - 'list'（模块名列表）, 'imports'（import语句）, 'both'（两者）
+            
+        Returns:
+            ExecutionResult 包含模块信息的执行结果
+        """
+        import sys
+        import os
+        
+        try:
+            # 获取所有已导入的模块
+            all_modules = list(sys.modules.keys())
+            
+            # 如果不包含标准库，过滤掉标准库模块
+            if not include_stdlib:
+                # 获取标准库路径
+                stdlib_paths = set()
+                try:
+                    import sysconfig
+                    stdlib_paths.add(os.path.normcase(sysconfig.get_path('stdlib')))
+                    stdlib_paths.add(os.path.normcase(sysconfig.get_path('platstdlib')))
+                except:
+                    pass
+                
+                # 过滤模块
+                filtered_modules = []
+                for module_name in all_modules:
+                    module = sys.modules.get(module_name)
+                    if module is None:
+                        continue
+                    
+                    # 跳过内置模块
+                    if not hasattr(module, '__file__') or module.__file__ is None:
+                        continue
+                    
+                    # 检查是否为标准库模块
+                    try:
+                        module_path = os.path.normcase(os.path.dirname(module.__file__))
+                        is_stdlib = any(module_path.startswith(stdlib_path) for stdlib_path in stdlib_paths)
+                        if not is_stdlib:
+                            # 只保留顶层模块名
+                            top_level = module_name.split('.')[0]
+                            if top_level not in filtered_modules:
+                                filtered_modules.append(top_level)
+                    except:
+                        pass
+                
+                modules = sorted(filtered_modules)
+            else:
+                # 提取顶层模块名并去重
+                top_level_modules = set()
+                for module_name in all_modules:
+                    top_level = module_name.split('.')[0]
+                    top_level_modules.add(top_level)
+                modules = sorted(top_level_modules)
+            
+            # 生成输出
+            if output_format == "list":
+                # 只返回模块名列表
+                output_text = "\n".join(modules)
+            elif output_format == "imports":
+                # 只返回纯净的import语句
+                import_statements = [f"import {module}" for module in modules]
+                output_text = "\n".join(import_statements)
+            elif output_format == "both":
+                # 返回格式化的完整信息（保留标题用于展示）
+                output_parts = []
+                output_parts.append("=== Imported Modules ===")
+                output_parts.append(f"Total: {len(modules)} modules")
+                output_parts.append("\n".join(modules))
+                output_parts.append("\n=== Import Statements ===")
+                import_statements = [f"import {module}" for module in modules]
+                output_parts.append("\n".join(import_statements))
+                output_text = "\n\n".join(output_parts)
+            else:
+                # 默认返回模块列表
+                output_text = "\n".join(modules)
+            
+            return ExecutionResult(
+                success=True,
+                output=output_text
+            )
+            
+        except Exception as e:
+            return ExecutionResult(
+                success=False,
+                error=f"Failed to get imported modules: {e}"
+            )
     
     @staticmethod
     def _enable_log_capture():

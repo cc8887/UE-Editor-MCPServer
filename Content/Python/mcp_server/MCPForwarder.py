@@ -244,6 +244,7 @@ class MCPForwarder:
         - execute: 执行Python代码
         - execute_file: 执行Python文件
         - get_state: 获取当前状态
+        - get_imported_modules: 获取已导入的模块
         
         Args:
             request: 请求字典
@@ -281,6 +282,12 @@ class MCPForwarder:
                 "state": self._state.value,
                 "timestamp": time.time()
             }
+        
+        elif msg_type == "get_imported_modules":
+            # 获取已导入的模块
+            include_stdlib = request.get("include_stdlib", False)
+            output_format = request.get("format", "imports")
+            return self._get_imported_modules(request_id, include_stdlib, output_format)
         
         else:
             # 未知消息类型
@@ -332,6 +339,35 @@ class MCPForwarder:
         
         # 使用通用CodeExecutor执行文件
         result = CodeExecutor.execute_file(file_path)
+        
+        self._state = ForwarderState.IDLE
+        
+        return {
+            "type": "result",
+            "id": request_id,
+            "success": result.success,
+            "output": result.output if result.success else None,
+            "error": result.error if not result.success else None,
+            "logs": result.logs if result.logs else None
+        }
+    
+    def _get_imported_modules(self, request_id: str, include_stdlib: bool = False, 
+                             output_format: str = "both") -> Dict[str, Any]:
+        """
+        获取已导入的模块
+        
+        Args:
+            request_id: 请求ID
+            include_stdlib: 是否包含标准库
+            output_format: 输出格式
+            
+        Returns:
+            执行结果字典
+        """
+        self._state = ForwarderState.EXECUTING
+        
+        # 使用CodeExecutor获取模块信息
+        result = CodeExecutor.get_imported_modules(include_stdlib, output_format)
         
         self._state = ForwarderState.IDLE
         

@@ -9,5 +9,33 @@ dependencies = [
     "anyio",
     "click",
     "starlette",
-    "pywin32"
+    "pywin32",
+    "mypy>=1.0.0"
     ]
+
+[tool.mypy]
+mypy_path = [
+    "../../Intermediate/PythonStub",
+    # Content/Python 已移除 - 运行时检查用户代码时不应搜索插件目录
+]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+
+# 排除自动生成的文件，不进行类型检查
+exclude = [
+    "^.*/Intermediate/PythonStub/.*",  # UE自动生成的类型存根
+]
+
+# 仅对特定的系统级/C扩展模块忽略导入检查
+[[tool.mypy.overrides]]
+module = [
+    "_overlapped",      # Windows 异步 I/O（C扩展）
+    "_winapi",          # Windows API（C扩展）
+    "pywin32.*",        # Win32 扩展库
+    "unreal",           # UE自动生成的类型存根（有重复定义问题）
+    "unreal_core",      # UE核心模块
+    "mcp_server",        # MCP服务器
+]
+ignore_missing_imports = true
+ignore_errors = true

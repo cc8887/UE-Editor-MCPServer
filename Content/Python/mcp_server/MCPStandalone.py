@@ -1,4 +1,4 @@
-﻿"""
+"""
 MCPStandalone - 独立进程MCP服务器
 功能：
 1. 运行完整的MCP服务（SSE端点）
@@ -20,6 +20,9 @@ import json
 import time
 import socket
 import sys
+import tempfile
+import os
+import subprocess
 from typing import Optional, Dict, Any, List, Callable
 from enum import Enum
 from dataclasses import dataclass
@@ -85,7 +88,8 @@ class EditorConnection:
     """
     
     def __init__(self, host: str = "127.0.0.1", port: int = 8100, 
-                 config: ConnectionConfig = None):
+                 config: ConnectionConfig = None, debug: bool = False,
+                 mypy_exclude_paths: List[str] = None):
         """
         初始化编辑器连接
         
@@ -93,10 +97,14 @@ class EditorConnection:
             host: 编辑器转发服务器地址
             port: 编辑器转发服务器端口
             config: 连接配置
+            debug: 是否开启调试模式
+            mypy_exclude_paths: MyPy检查时要排除的目录列表（绝对路径）
         """
         self.host = host
         self.port = port
         self.config = config or ConnectionConfig()
+        self.debug = debug
+        self.mypy_exclude_paths = mypy_exclude_paths or []
         
         self._socket: Optional[socket.socket] = None
         self._state = EditorState.DISCONNECTED
@@ -125,7 +133,10 @@ class EditorConnection:
         if self._state != new_state:
             old_state = self._state
             self._state = new_state
-            print(f"[EditorConnection] State: {old_state.value} -> {new_state.value}")
+            if self.debug:
+                print(f"[DEBUG][EditorConnection] State transition: {old_state.value} -> {new_state.value}")
+            else:
+                print(f"[EditorConnection] State: {old_state.value} -> {new_state.value}")
             
             if self.on_state_change:
                 try:
@@ -272,6 +283,10 @@ class EditorConnection:
         """处理接收到的消息"""
         request_id = message.get("id")
         
+        if self.debug:
+            print(f"[DEBUG][EditorConnection] Received message: id={request_id}, type={message.get('type')}")
+            print(f"[DEBUG][EditorConnection] Message content: {json.dumps(message, indent=2, ensure_ascii=False)[:500]}")
+        
         if request_id and request_id in self._pending_requests:
             future = self._pending_requests.pop(request_id)
             if not future.done():
@@ -302,6 +317,10 @@ class EditorConnection:
             request_id = f"req_{self._request_counter}_{int(time.time() * 1000)}"
             request["id"] = request_id
             
+            if self.debug:
+                print(f"[DEBUG][EditorConnection] Sending request: id={request_id}, type={request.get('type')}")
+                print(f"[DEBUG][EditorConnection] Request content: {json.dumps(request, indent=2, ensure_ascii=False)[:500]}")
+            
             future = asyncio.get_event_loop().create_future()
             self._pending_requests[request_id] = future
             
@@ -316,6 +335,10 @@ class EditorConnection:
                 await loop.sock_sendall(self._socket, length_prefix + data)
                 
                 response = await asyncio.wait_for(future, timeout=timeout)
+                
+                if self.debug:
+                    print(f"[DEBUG][EditorConnection] Received response for {request_id}")
+                
                 return response
                 
             except asyncio.TimeoutError:
@@ -337,18 +360,351 @@ class EditorConnection:
         except Exception:
             return False
     
-    async def execute_code(self, code: str, timeout: float = None) -> Dict[str, Any]:
-        """执行Python代码"""
-        return await self.send_request({
-            "type": "execute",
-            "code": code
-        }, timeout=timeout)
-    
     async def execute_file(self, file_path: str, timeout: float = None) -> Dict[str, Any]:
-        """执行Python文件"""
+        """
+        执行Python文件（自动进行mypy类型检查）
+        
+        Args:
+            file_path: Python文件路径
+            timeout: 执行超时时间
+            
+        Returns:
+            执行结果字典
+        """
+        # 先进行mypy类型检查
+        type_check_result = await self._check_file_with_mypy(file_path)
+        
+        if not type_check_result["success"]:
+            # 类型检查失败，直接返回错误，不执行文件
+            return {
+                "type": "result",
+                "success": False,
+                "output": None,
+                "error": f"Type check failed:\n" + "\n".join(type_check_result["errors"]),
+                "logs": None,
+                "type_check": type_check_result
+            }
+        
+        # 类型检查通过，执行文件
         return await self.send_request({
             "type": "execute_file",
             "file": file_path
+        }, timeout=timeout)
+    
+    async def _check_file_with_mypy(self, file_path: str) -> Dict[str, Any]:
+        """
+        使用mypy检查Python文件类型
+        
+        Args:
+            file_path: Python文件路径
+            
+        Returns:
+            检查结果字典 {"success": bool, "errors": List[str], "output": str}
+        """
+        try:
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Checking file: {file_path}")
+            
+            # 检查文件是否存在
+            if not os.path.exists(file_path):
+                return {
+                    "success": False,
+                    "errors": [f"File not found: {file_path}"],
+                    "output": "File not found"
+                }
+            
+            # 直接对文件运行mypy检查
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Running mypy on file...")
+            
+            result = subprocess.run(
+                [sys.executable, '-m', 'mypy', '--no-error-summary', '--show-error-codes', file_path],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Mypy return code: {result.returncode}")
+                if result.stdout:
+                    print(f"[DEBUG][TypeCheck] Mypy stdout:\n{result.stdout}")
+                if result.stderr:
+                    print(f"[DEBUG][TypeCheck] Mypy stderr:\n{result.stderr}")
+            
+            # 解析结果
+            if result.returncode == 0:
+                if self.debug:
+                    print(f"[DEBUG][TypeCheck] Type check passed")
+                return {
+                    "success": True,
+                    "errors": [],
+                    "output": "Type check passed"
+                }
+            else:
+                # 提取错误信息
+                error_lines = result.stdout.split('\n') if result.stdout else []
+                errors = [line.strip() for line in error_lines if line.strip() and file_path in line]
+                
+                if not errors and result.stdout:
+                    # 如果没有匹配到文件路径的错误，保留所有非空行
+                    errors = [line.strip() for line in error_lines if line.strip()]
+                
+                if self.debug:
+                    print(f"[DEBUG][TypeCheck] Type check failed with {len(errors)} error(s)")
+                    for err in errors:
+                        print(f"[DEBUG][TypeCheck]   - {err}")
+                
+                return {
+                    "success": False,
+                    "errors": errors,
+                    "output": f"Type check failed with {len(errors)} error(s)"
+                }
+                
+        except subprocess.TimeoutExpired:
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Mypy check timed out")
+            return {
+                "success": False,
+                "errors": ["Mypy check timed out"],
+                "output": "Type check timeout"
+            }
+        except FileNotFoundError:
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Mypy not found in current Python environment")
+                print(f"[DEBUG][TypeCheck] Current Python: {sys.executable}")
+            return {
+                "success": False,
+                "errors": [
+                    "Mypy not found in current Python environment.",
+                    f"Current Python: {sys.executable}",
+                    "Please install mypy in the current environment:",
+                    "  pip install mypy",
+                    "Or if using virtual environment:",
+                    "  .venv\\Scripts\\pip install mypy  (Windows)",
+                    "  .venv/bin/pip install mypy      (Linux/Mac)"
+                ],
+                "output": "Mypy not available"
+            }
+        except Exception as e:
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Type check error: {e}")
+            return {
+                "success": False,
+                "errors": [f"Type check error: {str(e)}"],
+                "output": "Type check failed"
+            }
+    
+    async def get_imported_modules(self, include_stdlib: bool = False, 
+                                   output_format: str = "both", 
+                                   timeout: float = None) -> Dict[str, Any]:
+        """获取已导入的模块"""
+        return await self.send_request({
+            "type": "get_imported_modules",
+            "include_stdlib": include_stdlib,
+            "format": output_format
+        }, timeout=timeout)
+    
+    async def _check_code_with_mypy(self, code: str) -> Dict[str, Any]:
+        """
+        使用mypy检查代码类型
+        
+        Args:
+            code: 要检查的Python代码
+            
+        Returns:
+            检查结果字典 {"success": bool, "errors": List[str], "output": str}
+        """
+        try:
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Checking code snippet (length: {len(code)} chars)")
+            
+            # 1. 获取已导入的模块
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Fetching imported modules from editor...")
+            
+            modules_result = await self.get_imported_modules(
+                include_stdlib=False, 
+                output_format="imports",
+                timeout=10.0
+            )
+            
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Modules result success: {modules_result.get('success')}")
+                if modules_result.get('success'):
+                    raw_output = modules_result.get('output', '')
+                    print(f"[DEBUG][TypeCheck] Raw modules output ({len(raw_output)} chars):")
+                    print("--- Raw Output Start ---")
+                    print(repr(raw_output))  # 使用repr显示转义字符
+                    print("--- Raw Output End ---")
+                else:
+                    print(f"[DEBUG][TypeCheck] Modules error: {modules_result.get('error')}")
+            
+            if not modules_result.get('success'):
+                if self.debug:
+                    print(f"[DEBUG][TypeCheck] Failed to get modules: {modules_result.get('error')}")
+                return {
+                    "success": False,
+                    "errors": [f"Failed to get imported modules: {modules_result.get('error', 'Unknown error')}"],
+                    "output": ""
+                }
+            
+            # 2. 构建完整的代码文件内容
+            imports_code = modules_result.get('output', '')
+            full_code = f"{imports_code}\n\n# User code:\n{code}"
+            
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Generated full code with {len(imports_code)} chars of imports")
+                print(f"[DEBUG][TypeCheck] Full code preview (first 500 chars):\n{full_code[:500]}")
+            
+            # 3. 创建临时文件
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as temp_file:
+                temp_file.write(full_code)
+                temp_file_path = temp_file.name
+            
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Created temp file: {temp_file_path}")
+                print(f"[DEBUG][TypeCheck] Temp file content ({len(full_code)} chars):")
+                print("=" * 40)
+                print(full_code)
+                print("=" * 40)
+            
+            try:
+                # 4. 运行mypy检查
+                if self.debug:
+                    print(f"[DEBUG][TypeCheck] Running mypy on temp file...")
+                
+                # 构建mypy命令
+                mypy_cmd = [
+                    sys.executable, '-m', 'mypy',
+                    '--no-error-summary',
+                    '--show-error-codes',
+                ]
+                
+                # 添加排除路径（如果有配置）
+                for exclude_path in self.mypy_exclude_paths:
+                    if self.debug:
+                        print(f"[DEBUG][TypeCheck] Excluding path: {exclude_path}")
+                    mypy_cmd.extend(['--exclude', f'{exclude_path}/.*'])
+                
+                mypy_cmd.append(temp_file_path)
+                
+                result = subprocess.run(
+                    mypy_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                
+                if self.debug:
+                    print(f"[DEBUG][TypeCheck] Mypy return code: {result.returncode}")
+                    if result.stdout:
+                        print(f"[DEBUG][TypeCheck] Mypy stdout:\n{result.stdout}")
+                    if result.stderr:
+                        print(f"[DEBUG][TypeCheck] Mypy stderr:\n{result.stderr}")
+                
+                # 5. 解析结果
+                if result.returncode == 0:
+                    if self.debug:
+                        print(f"[DEBUG][TypeCheck] Type check passed")
+                    return {
+                        "success": True,
+                        "errors": [],
+                        "output": "Type check passed"
+                    }
+                else:
+                    # 过滤错误信息，只保留用户代码相关的错误
+                    error_lines = result.stdout.split('\n') if result.stdout else []
+                    user_errors = []
+                    
+                    for line in error_lines:
+                        if line.strip() and temp_file_path in line:
+                            # 提取错误信息，移除临时文件路径
+                            clean_line = line.replace(temp_file_path, '<user_code>')
+                            user_errors.append(clean_line)
+                    
+                    if self.debug:
+                        print(f"[DEBUG][TypeCheck] Type check failed with {len(user_errors)} error(s)")
+                        for err in user_errors:
+                            print(f"[DEBUG][TypeCheck]   - {err}")
+                    
+                    return {
+                        "success": False,
+                        "errors": user_errors,
+                        "output": f"Type check failed with {len(user_errors)} error(s)"
+                    }
+                    
+            finally:
+                # 6. 清理临时文件
+                try:
+                    os.unlink(temp_file_path)
+                    if self.debug:
+                        print(f"[DEBUG][TypeCheck] Cleaned up temp file")
+                except OSError:
+                    pass
+                    
+        except subprocess.TimeoutExpired:
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Mypy check timed out")
+            return {
+                "success": False,
+                "errors": ["Mypy check timed out"],
+                "output": "Type check timeout"
+            }
+        except FileNotFoundError:
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Mypy not found in current Python environment")
+                print(f"[DEBUG][TypeCheck] Current Python: {sys.executable}")
+            return {
+                "success": False,
+                "errors": [
+                    "Mypy not found in current Python environment.",
+                    f"Current Python: {sys.executable}",
+                    "Please install mypy in the current environment:",
+                    "  pip install mypy",
+                    "Or if using virtual environment:",
+                    "  .venv\\Scripts\\pip install mypy  (Windows)",
+                    "  .venv/bin/pip install mypy      (Linux/Mac)"
+                ],
+                "output": "Mypy not available"
+            }
+        except Exception as e:
+            if self.debug:
+                print(f"[DEBUG][TypeCheck] Type check error: {e}")
+            return {
+                "success": False,
+                "errors": [f"Type check error: {str(e)}"],
+                "output": "Type check failed"
+            }
+    
+    async def execute_code(self, code: str, timeout: float = None) -> Dict[str, Any]:
+        """
+        执行Python代码（自动进行mypy类型检查）
+        
+        Args:
+            code: 要执行的Python代码
+            timeout: 执行超时时间
+            
+        Returns:
+            执行结果字典
+        """
+        # 先进行mypy类型检查
+        type_check_result = await self._check_code_with_mypy(code)
+        
+        if not type_check_result["success"]:
+            # 类型检查失败，直接返回错误，不执行代码
+            return {
+                "type": "result",
+                "success": False,
+                "output": None,
+                "error": f"Type check failed:\n" + "\n".join(type_check_result["errors"]),
+                "logs": None,
+                "type_check": type_check_result
+            }
+        
+        # 类型检查通过，执行代码
+        return await self.send_request({
+            "type": "execute",
+            "code": code
         }, timeout=timeout)
 
 
@@ -369,7 +725,9 @@ class MCPStandaloneServer:
                  mcp_host: str = "127.0.0.1", 
                  mcp_port: int = 8099,
                  editor_host: str = "127.0.0.1",
-                 editor_port: int = 8100):
+                 editor_port: int = 8100,
+                 debug: bool = False,
+                 mypy_exclude_paths: List[str] = None):
         """
         初始化MCP服务器
         
@@ -378,11 +736,30 @@ class MCPStandaloneServer:
             mcp_port: MCP服务监听端口
             editor_host: 编辑器转发服务器地址
             editor_port: 编辑器转发服务器端口
+            debug: 是否开启调试模式
+            mypy_exclude_paths: MyPy检查时要排除的目录列表（绝对路径）
         """
         self.mcp_host = mcp_host
         self.mcp_port = mcp_port
+        self.debug = debug
         
-        self.editor_connection = EditorConnection(editor_host, editor_port)
+        # 从环境变量读取排除路径（如果未指定）
+        if mypy_exclude_paths is None:
+            mypy_exclude_paths = []
+            env_paths = os.environ.get('MCP_MYPY_EXCLUDE_PATHS', '')
+            if env_paths:
+                # Windows 路径包含冒号（如 C:\），使用分号作为分隔符
+                # 如果没有分号，说明只有一个路径
+                if ';' in env_paths:
+                    mypy_exclude_paths = [p.strip() for p in env_paths.split(';') if p.strip()]
+                elif env_paths.strip():
+                    mypy_exclude_paths = [env_paths.strip()]
+        
+        self.editor_connection = EditorConnection(
+            editor_host, editor_port, 
+            debug=debug,
+            mypy_exclude_paths=mypy_exclude_paths
+        )
         self.editor_connection.on_state_change = self._on_editor_state_change
         self.editor_connection.on_disconnected = self._on_editor_disconnected
         
@@ -430,6 +807,10 @@ class MCPStandaloneServer:
         Returns:
             ExecutionResult 执行结果
         """
+        if self.debug:
+            print(f"[DEBUG][MCPServer] Tool call: {name}")
+            print(f"[DEBUG][MCPServer] Arguments: {json.dumps(arguments, indent=2, ensure_ascii=False)[:300]}")
+        
         # 检查编辑器连接状态
         if not self.editor_connection.is_connected:
             return ExecutionResult(
@@ -441,6 +822,7 @@ class MCPStandaloneServer:
         try:
             if name == "execute_command":
                 code = arguments.get('code', '')
+                # 始终进行类型检查
                 result = await self.editor_connection.execute_code(code)
                 return self._parse_editor_response(result)
                 
@@ -470,6 +852,10 @@ class MCPStandaloneServer:
                 error=f"Connection lost to editor. The editor may have crashed.\n\nDetails: {e}"
             )
         except Exception as e:
+            if self.debug:
+                import traceback
+                print(f"[DEBUG][MCPServer] Tool call error: {e}")
+                print(f"[DEBUG][MCPServer] Traceback:\n{traceback.format_exc()}")
             return ExecutionResult(success=False, error=str(e))
     
     def _parse_editor_response(self, result: Dict[str, Any]) -> ExecutionResult:
@@ -518,7 +904,8 @@ class MCPStandaloneServer:
         
         @mcp_app.call_tool()
         async def call_tools(name: str, arguments: dict) -> list:
-            print(f"[MCPServer] Tool call: {name}, args: {arguments}")
+            if server_self.debug:
+                print(f"[DEBUG][MCPServer] MCP tool request: {name}")
             result = await server_self._handle_tool_call(name, arguments)
             return result.to_mcp_content()
         
@@ -626,6 +1013,7 @@ Examples:
   python MCPStandalone.py
   python MCPStandalone.py --mcp-port 8099 --editor-port 8100
   python MCPStandalone.py --mcp-host 0.0.0.0 --mcp-port 8099
+  python MCPStandalone.py --debug
 
 Configuration:
   Port settings can be configured via:
@@ -633,6 +1021,13 @@ Configuration:
   2. Environment variables (MCP_PORT, MCP_HOST, EDITOR_PORT, EDITOR_HOST)
   3. .env file in the plugin root directory
   4. Default values
+
+Debug Mode:
+  Use --debug flag to enable detailed logging of:
+  - Type checking process and results
+  - Network requests and responses
+  - Editor connection state changes
+  - Error tracebacks
 
 Note:
   This server connects to a UE Editor running the MCPForwarder plugin.
@@ -649,6 +1044,8 @@ Note:
                         help=f'Editor forwarder host (default: {config["editor_host"]})')
     parser.add_argument('--editor-port', type=int, default=None, 
                         help=f'Editor forwarder port (default: {config["editor_port"]})')
+    parser.add_argument('--debug', action='store_true', default=False,
+                        help='Enable debug mode for detailed logging')
     
     args = parser.parse_args()
     
@@ -657,25 +1054,35 @@ Note:
     mcp_port = args.mcp_port if args.mcp_port is not None else config["mcp_port"]
     editor_host = args.editor_host if args.editor_host is not None else config["editor_host"]
     editor_port = args.editor_port if args.editor_port is not None else config["editor_port"]
+    debug = args.debug
     
     print("=" * 60)
     print("MCP Standalone Server for Unreal Engine")
     print("=" * 60)
     print(f"MCP Server: {mcp_host}:{mcp_port}")
     print(f"Editor Forwarder: {editor_host}:{editor_port}")
+    print(f"Debug Mode: {'ENABLED' if debug else 'disabled'}")
     print("=" * 60)
     print()
     print("Connection detection: TCP connection state")
     print("- TCP connected = Editor running")
     print("- TCP disconnected = Editor crashed/closed")
     print("- Automatic reconnection enabled")
+    if debug:
+        print()
+        print("Debug mode enabled - detailed logging active:")
+        print("  * Type checking process details")
+        print("  * Network request/response content")
+        print("  * State transition logging")
+        print("  * Error tracebacks")
     print()
     
     server = MCPStandaloneServer(
         mcp_host=mcp_host,
         mcp_port=mcp_port,
         editor_host=editor_host,
-        editor_port=editor_port
+        editor_port=editor_port,
+        debug=debug
     )
     
     try:

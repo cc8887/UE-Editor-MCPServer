@@ -20,6 +20,14 @@ def main():
     print("UE Editor MCP Standalone Server")
     print("=" * 60)
     
+    # 计算插件根目录的绝对路径
+    # main.py 在 Plugins/UE-Editor-MCPServer/ 下
+    plugin_root = os.path.abspath(script_dir)
+    print(f"Plugin root: {plugin_root}")
+    
+    # 将排除路径传递给环境变量，供MCPStandalone使用
+    os.environ['MCP_MYPY_EXCLUDE_PATHS'] = plugin_root
+    
     try:
         # 将mcp_server目录添加到sys.path，使MCPStandalone能导入MCPCore
         mcp_server_dir = os.path.join(python_dir, "mcp_server")

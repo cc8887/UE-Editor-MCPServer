@@ -78,13 +78,23 @@ python main.py
 
 服务器会自动读取 `.env` 配置。也支持命令行参数覆盖（优先级高于 `.env`）：
 
-- `--mcp-port`: MCP服务器端口
-- `--editor-port`: 编辑器转发服务器端口
+- `--mcp-host`: MCP服务器监听地址（默认：127.0.0.1）
+- `--mcp-port`: MCP服务器端口（默认：8099）
+- `--editor-host`: 编辑器转发服务器地址（默认：127.0.0.1）
+- `--editor-port`: 编辑器转发服务器端口（默认：8100）
+- `--debug`: 启用调试模式，输出详细日志
 
 示例：
 
 ```cmd
+# 基础使用
 python main.py --mcp-port 8099 --editor-port 8100
+
+# 启用调试模式
+python main.py --debug
+
+# 自定义地址和端口并启用调试
+python main.py --mcp-host 0.0.0.0 --mcp-port 8099 --editor-port 8100 --debug
 ```
 
 #### 5. 配置MCP客户端
@@ -175,6 +185,7 @@ print("UE Editor MCP Server is working!")
 - 确认端口号是否正确（默认 8099）
 - 检查防火墙设置，确保允许本地连接
 - 查看服务器终端输出，寻找错误信息
+- **使用调试模式**：运行 `python main.py --debug` 查看详细连接日志
 
 **问题 2：工具调用失败**
 
@@ -182,6 +193,7 @@ print("UE Editor MCP Server is working!")
 - （UE4）检查 Forwarder 是否正常运行（端口 8100）
 - 在 UE 编辑器的 Python 控制台中手动测试代码是否能执行
 - 查看编辑器的输出日志（Output Log 窗口）
+- **使用调试模式**：运行 `python main.py --debug` 查看请求/响应详情
 
 **问题 3：端口冲突**
 
