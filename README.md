@@ -19,6 +19,14 @@ python新手，欢迎大佬们提各种建议
 
 目前仅提供了示例版本的MCPServer，若想扩展功能请修改 `Content/Python/mcp_server/` 目录下的脚本（主要入口为 `MCPStandalone.py`、`MCPServer.py`）
 
+> **⚠️ 重要：SSE 端点路径必须使用大写 `/SSE`**
+>
+> MCP 客户端配置中的 URL 路径为 **大写的 `/SSE`**（不是小写的 `/sse`）。
+> 服务器端路由区分大小写，使用小写 `/sse` 将导致连接失败（404 / ECONNREFUSED）。
+>
+> 正确示例：`http://127.0.0.1:8099/SSE` ✅
+> 错误示例：`http://127.0.0.1:8099/sse` ❌
+
 
 ## UE4 使用指南
 
