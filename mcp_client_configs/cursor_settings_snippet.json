@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "ue-editor-alsv": {
+        "type": "sse",
+        "url": "http://127.0.0.1:8099/sse"
+      }
+    }
+  }
+}

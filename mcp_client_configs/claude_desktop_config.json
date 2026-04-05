@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "ue-editor-alsv": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--directory",
+        "<YOUR_PLUGIN_PATH>",
+        "python",
+        "main.py"
+      ],
+      "env": {
+        "MCP_PORT": "8099",
+        "MCP_HOST": "127.0.0.1",
+        "EDITOR_PORT": "8100",
+        "EDITOR_HOST": "127.0.0.1"
+      }
+    }
+  }
+}
