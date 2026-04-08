@@ -124,6 +124,13 @@ def start_ue5():
     log = _get_log_function()
     log("[MCP] Starting UE5 full MCP server mode")
     
+    # 从配置文件读取 host/port
+    from . import MCPConfig
+    config = MCPConfig.load_config()
+    host = config["mcp_host"]
+    port = config["mcp_port"]
+    log(f"[MCP] Config: host={host}, port={port}")
+    
     # 导入类（__init__.py已将类导出到包级别）
     from . import Manager as ManagerClass
     from . import MCPServer as MCPServerClass
@@ -132,7 +139,7 @@ def start_ue5():
     
     # 创建实例
     event_manager = ManagerClass()
-    mcp_server = MCPServerClass()
+    mcp_server = MCPServerClass(host=host, port=port)
     
     # 运行服务器
     event_manager.run_until_complete(mcp_server.run_server(), use_heart=False)

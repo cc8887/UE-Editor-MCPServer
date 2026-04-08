@@ -9,6 +9,9 @@ MCPCore - MCP公共核心模块
 注意：此模块不依赖unreal包，可在编辑器外独立使用
 """
 
+import os
+import sys
+from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
 
@@ -200,6 +203,100 @@ def get_mcp_tools(tool_definitions: List[ToolDefinition] = None) -> list:
 # 代码执行结果
 # ============================================================================
 
+# 大日志输出阈值
+LOG_MAX_LINES = 20
+LOG_MAX_CHARS = 400
+
+
+def _get_log_dir() -> str:
+    """
+    获取 MCP 日志输出目录。
+
+    搜索顺序：
+    1. UE 项目级别: <ProjectDir>/Saved/Logs/MCP/
+       - 通过 unreal.EditorAssetLibrary 或环境变量 UE_PROJECT_DIR 定位
+    2. 插件级别: <PluginRoot>/Saved/Logs/MCP/
+       - 向上追溯到插件根目录
+    3. 回退: 系统临时目录
+
+    Returns:
+        日志目录的绝对路径
+    """
+    # 1. 尝试通过 unreal 获取 UE 项目目录
+    try:
+        import unreal
+        project_dir = unreal.EditorAssetLibrary.get_current_level_directory()
+        if project_dir:
+            # get_current_level_directory 返回 /Game/xxx，取项目根目录
+            project_dir = unreal.Paths.project_dir()
+            if project_dir:
+                log_dir = os.path.join(project_dir, "Saved", "Logs", "MCP")
+                os.makedirs(log_dir, exist_ok=True)
+                return log_dir
+    except Exception:
+        pass
+
+    # 2. 回退：尝试通过环境变量获取项目目录
+    ue_project_dir = os.environ.get("UE_PROJECT_DIR")
+    if ue_project_dir and os.path.isdir(ue_project_dir):
+        log_dir = os.path.join(ue_project_dir, "Saved", "Logs", "MCP")
+        os.makedirs(log_dir, exist_ok=True)
+        return log_dir
+
+    # 3. 回退：插件根目录下的 Saved/Logs/MCP/
+    plugin_root = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+    )
+    if os.path.isdir(plugin_root):
+        log_dir = os.path.join(plugin_root, "Saved", "Logs", "MCP")
+        os.makedirs(log_dir, exist_ok=True)
+        return log_dir
+
+    # 4. 最终回退：系统临时目录
+    import tempfile
+    fallback_dir = os.path.join(tempfile.gettempdir(), "MCPLogs")
+    os.makedirs(fallback_dir, exist_ok=True)
+    return fallback_dir
+
+
+def _save_log_to_file(full_text: str) -> str:
+    """
+    将长日志保存到文件，返回文件路径。
+
+    文件保存到项目 Saved/Logs/MCP/ 目录下，命名格式: mcp_log_<时间戳>_<序号>.txt
+    如果无法定位项目目录，则回退到插件目录或系统临时目录。
+
+    Args:
+        full_text: 要保存的完整日志文本
+
+    Returns:
+        保存的文件路径
+    """
+    log_dir = _get_log_dir()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_name = f"mcp_log_{timestamp}"
+    file_path = os.path.join(log_dir, f"{base_name}.txt")
+
+    # 避免同秒冲突，追加序号
+    counter = 0
+    while os.path.exists(file_path):
+        counter += 1
+        file_path = os.path.join(log_dir, f"{base_name}_{counter}.txt")
+
+    with open(file_path, 'w', encoding='utf-8') as f:
+        f.write(full_text)
+
+    return file_path
+
+
+def _should_spill(full_text: str) -> bool:
+    """判断文本是否超过阈值，需要输出到文件"""
+    lines = full_text.split('\n')
+    # 去掉尾部空行后再计数
+    non_empty_lines = [l for l in lines if l.strip()]
+    return len(non_empty_lines) > LOG_MAX_LINES or len(full_text) > LOG_MAX_CHARS
+
+
 @dataclass
 class ExecutionResult:
     """代码执行结果"""
@@ -209,16 +306,22 @@ class ExecutionResult:
     logs: str = ""
     
     def to_text(self) -> str:
-        """转换为文本输出"""
+        """转换为文本输出。如果日志超过阈值，保存到文件并返回文件路径。"""
         if self.success:
             text = self.output or "Execution completed successfully."
         else:
             text = f"Error: {self.error}" if self.error else "Execution failed."
         
         if self.logs:
-            text += f"\n\nCaptured Logs:\n{self.logs}"
+            full_text = text + f"\n\nCaptured Logs:\n{self.logs}"
+        else:
+            full_text = text
         
-        return text
+        if _should_spill(full_text):
+            file_path = _save_log_to_file(full_text)
+            return f"[Output exceeded threshold. Full output saved to: {file_path}]"
+        
+        return full_text
     
     def to_mcp_content(self) -> list:
         """转换为MCP TextContent列表"""
