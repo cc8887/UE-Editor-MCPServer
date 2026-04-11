@@ -1,18 +1,15 @@
 ﻿"""
 Start.py - MCP服务启动入口
-支持UE4和UE5两种模式：
-- UE5模式：直接使用MCP库在编辑器进程内运行完整MCP服务器
-- UE4模式：启动转发服务器，配合外部MCPStandalone.py使用
+统一使用转发器模式（Forwarder + MCPStandalone 双进程架构）：
+- 编辑器内运行MCPForwarder（TCP转发器）
+- 外部运行MCPStandalone.py（独立SSE服务）
 
 使用方法：
-    # 自动检测模式
+    # 启动服务（统一转发器模式）
     from mcp_server import Start
     Start.start()
     
-    # 强制UE5模式
-    Start.start_ue5()
-    
-    # 强制UE4模式（转发器）
+    # 显式调用（等价于start()）
     Start.start_ue4()
 """
 
@@ -21,11 +18,9 @@ import sys
 
 # 模块引用
 modular_Manager = None
-modular_MCPServer = None
 modular_MCPForwarder = None
 
 # 实例引用
-mcp_server = None
 mcp_forwarder = None
 event_manager = None
 
@@ -68,81 +63,24 @@ def get_ue_version():
         return 4
 
 
-def is_mcp_available():
-    """
-    检查是否可以直接使用MCP库
-    
-    Returns:
-        bool: MCP库是否可用
-    """
-    try:
-        import mcp
-        import uvicorn
-        import starlette
-        return True
-    except ImportError:
-        return False
-
-
 def start():
     """
-    启动MCP服务（自动选择模式）
+    启动MCP服务（统一转发器模式）
     
-    根据UE版本和MCP库可用性自动选择：
-    - UE5 + MCP可用：完整MCP服务器模式
-    - UE4 或 MCP不可用：转发器模式
+    无论UE4还是UE5，统一使用 Forwarder + MCPStandalone 双进程架构：
+    - 编辑器内：MCPForwarder（TCP转发器）
+    - 外部进程：MCPStandalone.py（SSE服务）
     """
-    global modular_Manager, modular_MCPServer, modular_MCPForwarder
-    global mcp_server, mcp_forwarder, event_manager
+    global modular_Manager, modular_MCPForwarder
+    global mcp_forwarder, event_manager
     
     log = _get_log_function()
-    
     ue_version = get_ue_version()
-    mcp_available = is_mcp_available()
     
-    log(f"[MCP] UE Version: {ue_version}, MCP Library Available: {mcp_available}")
-    
-    if ue_version >= 5 and mcp_available:
-        # UE5 + MCP可用：使用完整MCP服务器
-        log("[MCP] Starting full MCP server mode (UE5)")
-        start_ue5()
-    else:
-        # UE4 或 MCP不可用：使用转发模式
-        log("[MCP] Starting forwarder mode (UE4 compatible)")
-        log("[MCP] Please run MCPStandalone.py in a separate terminal to provide MCP service")
-        start_ue4()
-
-
-def start_ue5():
-    """
-    强制启动UE5模式（完整MCP服务器）
-    
-    在编辑器进程内直接运行MCP服务器，需要MCP库可用
-    """
-    global modular_Manager, modular_MCPServer, mcp_server, event_manager
-    
-    log = _get_log_function()
-    log("[MCP] Starting UE5 full MCP server mode")
-    
-    # 从配置文件读取 host/port
-    from . import MCPConfig
-    config = MCPConfig.load_config()
-    host = config["mcp_host"]
-    port = config["mcp_port"]
-    log(f"[MCP] Config: host={host}, port={port}")
-    
-    # 导入类（__init__.py已将类导出到包级别）
-    from . import Manager as ManagerClass
-    from . import MCPServer as MCPServerClass
-    modular_Manager = ManagerClass
-    modular_MCPServer = MCPServerClass
-    
-    # 创建实例
-    event_manager = ManagerClass()
-    mcp_server = MCPServerClass(host=host, port=port)
-    
-    # 运行服务器
-    event_manager.run_until_complete(mcp_server.run_server(), use_heart=False)
+    log(f"[MCP] UE Version: {ue_version}, Mode: forwarder (unified)")
+    log("[MCP] Starting forwarder mode (unified for UE4/UE5)")
+    log("[MCP] Please run MCPStandalone.py in a separate terminal to provide MCP service")
+    start_ue4()
 
 
 def start_ue4(host: str = None, port: int = None):
@@ -207,8 +145,8 @@ def reload():
     """
     重新加载模块并重启服务
     """
-    global modular_Manager, modular_MCPServer, modular_MCPForwarder
-    global mcp_server, mcp_forwarder, event_manager
+    global modular_Manager, modular_MCPForwarder
+    global mcp_forwarder, event_manager
     
     log = _get_log_function()
     log("[MCP] Reloading...")
@@ -223,13 +161,6 @@ def reload():
         except Exception as e:
             log(f"[MCP] Failed to reload Manager: {e}")
             modular_Manager = None
-    
-    if modular_MCPServer is not None:
-        try:
-            modular_MCPServer = importlib.reload(modular_MCPServer)
-        except Exception as e:
-            log(f"[MCP] Failed to reload MCPServer: {e}")
-            modular_MCPServer = None
     
     if modular_MCPForwarder is not None:
         try:
@@ -247,24 +178,10 @@ def stop():
     """
     停止所有服务并清理资源
     """
-    global mcp_server, mcp_forwarder, event_manager
+    global mcp_forwarder, event_manager
     
     log = _get_log_function()
     log("[MCP] Stopping service...")
-    
-    # 停止MCP服务器
-    if mcp_server is not None:
-        try:
-            # MCPServer.destroy 可能是异步的
-            import asyncio
-            if asyncio.iscoroutinefunction(mcp_server.destroy):
-                # 如果是协程，需要在事件循环中执行
-                pass
-            else:
-                mcp_server.destroy()
-        except Exception as e:
-            log(f"[MCP] Error stopping MCP server: {e}")
-        mcp_server = None
     
     # 停止转发服务器
     if mcp_forwarder is not None:
@@ -294,17 +211,13 @@ def get_status():
     """
     status = {
         "ue_version": get_ue_version(),
-        "mcp_available": is_mcp_available(),
         "mode": None,
         "running": False,
         "connected": False
     }
     
-    if mcp_server is not None:
-        status["mode"] = "ue5_full"
-        status["running"] = True
-    elif mcp_forwarder is not None:
-        status["mode"] = "ue4_forwarder"
+    if mcp_forwarder is not None:
+        status["mode"] = "forwarder"
         status["running"] = mcp_forwarder.is_running
         status["connected"] = mcp_forwarder.is_connected
     
@@ -320,9 +233,8 @@ def print_status():
     log("[MCP] Service Status")
     log("=" * 50)
     log(f"  UE Version: {status['ue_version']}")
-    log(f"  MCP Library Available: {status['mcp_available']}")
     log(f"  Mode: {status['mode'] or 'Not started'}")
     log(f"  Running: {status['running']}")
-    if status['mode'] == 'ue4_forwarder':
+    if status['mode'] == 'forwarder':
         log(f"  Client Connected: {status['connected']}")
     log("=" * 50)

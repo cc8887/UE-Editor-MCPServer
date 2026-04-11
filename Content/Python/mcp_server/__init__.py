@@ -5,9 +5,9 @@ mcp_server - UE Editor MCP Server 核心模块
 - MCPCore: MCP公共核心模块（依赖导入、工具定义、执行结果）- 不依赖unreal
 - CustomEventLoop: 自定义事件循环（适配UE编辑器tick）
 - Manager: 事件管理器
-- MCPServer: UE5完整MCP服务器（包含CodeExecutor，依赖unreal）
-- MCPForwarder: UE4转发服务器
-- MCPStandalone: 独立进程MCP服务器
+- MCPForwarder: 转发服务器（编辑器内TCP转发器，统一UE4/UE5使用）
+- MCPStandalone: 独立进程MCP服务器（SSE服务）
+- MCPServer: 编辑器内MCP服务器（已弃用，保留兼容）
 - Start: 启动入口
 """
 
