@@ -59,6 +59,7 @@ MCP_IMPORTS = [
     ("mcp.types", "import mcp.types as types", ["types"]),
     ("mcp.server.lowlevel", "from mcp.server.lowlevel import Server", ["Server"]),
     ("mcp.server.sse", "from mcp.server.sse import SseServerTransport", ["SseServerTransport"]),
+    ("mcp.server.stdio", "from mcp.server.stdio import stdio_server", ["stdio_server"]),
 ]
 
 MCP_AVAILABLE, MCP_IMPORT_ERRORS, _mcp_modules = try_imports(
@@ -70,6 +71,7 @@ MCP_AVAILABLE, MCP_IMPORT_ERRORS, _mcp_modules = try_imports(
 types = _mcp_modules.get("types")
 Server = _mcp_modules.get("Server")
 SseServerTransport = _mcp_modules.get("SseServerTransport")
+stdio_server = _mcp_modules.get("stdio_server")
 
 
 # HTTP 服务器依赖导入（静默模式，UE4下不可用是正常的）

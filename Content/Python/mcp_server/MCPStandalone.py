@@ -1,18 +1,21 @@
 """
 MCPStandalone - 独立进程MCP服务器
 功能：
-1. 运行完整的MCP服务（SSE端点）
+1. 运行完整的MCP服务（支持 SSE 和 stdio 两种传输模式）
 2. 连接到UE编辑器内的转发服务器
 3. 通过TCP连接状态监控编辑器健康状态（连接断开=编辑器崩溃/关闭）
 4. 自动重连机制
 
-设计说明：
-- 使用TCP连接状态来检测编辑器崩溃，不依赖心跳超时
-- TCP连接断开即认为编辑器已崩溃或关闭
-- 支持自动重连，编辑器重启后自动恢复连接
+传输模式：
+- stdio（默认）: 由MCP客户端自动拉起，通过stdin/stdout通信，日志输出到stderr
+- sse: 独立HTTP服务，通过SSE端点通信
 
 使用方法：
-    python MCPStandalone.py --mcp-port 8099 --editor-port 8100
+    # stdio 模式（默认，通常由MCP客户端自动拉起）
+    python MCPStandalone.py --editor-port 8100
+
+    # SSE 模式（手动启动）
+    python MCPStandalone.py --transport sse --mcp-port 8099 --editor-port 8100
 """
 
 import asyncio
@@ -27,12 +30,18 @@ from typing import Optional, Dict, Any, List, Callable
 from enum import Enum
 from dataclasses import dataclass
 
+
+def _log(msg: str):
+    """统一日志函数，始终输出到 stderr（stdio模式下 stdout 被 MCP 协议占用）"""
+    print(msg, file=sys.stderr)
+
+
 # 支持作为模块导入和独立脚本运行
 try:
     from .MCPCore import (
         MCP_AVAILABLE, MCP_IMPORT_ERRORS,
         STARLETTE_AVAILABLE, STARLETTE_IMPORT_ERRORS,
-        types, Server, SseServerTransport,
+        types, Server, SseServerTransport, stdio_server,
         uvicorn, Starlette, Mount, Route,
         ExecutionResult,
         ToolDefinition, TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE,
@@ -43,7 +52,7 @@ except ImportError:
     from MCPCore import (
         MCP_AVAILABLE, MCP_IMPORT_ERRORS,
         STARLETTE_AVAILABLE, STARLETTE_IMPORT_ERRORS,
-        types, Server, SseServerTransport,
+        types, Server, SseServerTransport, stdio_server,
         uvicorn, Starlette, Mount, Route,
         ExecutionResult,
         ToolDefinition, TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE,
@@ -134,21 +143,21 @@ class EditorConnection:
             old_state = self._state
             self._state = new_state
             if self.debug:
-                print(f"[DEBUG][EditorConnection] State transition: {old_state.value} -> {new_state.value}")
+                _log(f"[DEBUG][EditorConnection] State transition: {old_state.value} -> {new_state.value}")
             else:
-                print(f"[EditorConnection] State: {old_state.value} -> {new_state.value}")
+                _log(f"[EditorConnection] State: {old_state.value} -> {new_state.value}")
             
             if self.on_state_change:
                 try:
                     self.on_state_change(old_state, new_state)
                 except Exception as e:
-                    print(f"[EditorConnection] State change callback error: {e}")
+                    _log(f"[EditorConnection] State change callback error: {e}")
             
             if new_state == EditorState.DISCONNECTED and self.on_disconnected:
                 try:
                     self.on_disconnected()
                 except Exception as e:
-                    print(f"[EditorConnection] Disconnected callback error: {e}")
+                    _log(f"[EditorConnection] Disconnected callback error: {e}")
     
     async def connect(self) -> bool:
         """
@@ -173,26 +182,26 @@ class EditorConnection:
                     timeout=self.config.connect_timeout
                 )
             except asyncio.TimeoutError:
-                print(f"[EditorConnection] Connection timeout to {self.host}:{self.port}")
+                _log(f"[EditorConnection] Connection timeout to {self.host}:{self.port}")
                 self._close_socket()
                 self._set_state(EditorState.DISCONNECTED)
                 return False
             except ConnectionRefusedError:
-                print(f"[EditorConnection] Connection refused by {self.host}:{self.port}")
+                _log(f"[EditorConnection] Connection refused by {self.host}:{self.port}")
                 self._close_socket()
                 self._set_state(EditorState.DISCONNECTED)
                 return False
             
             self._recv_buffer = b""
             self._set_state(EditorState.CONNECTED)
-            print(f"[EditorConnection] Connected to editor at {self.host}:{self.port}")
+            _log(f"[EditorConnection] Connected to editor at {self.host}:{self.port}")
             
             self._receive_task = asyncio.create_task(self._receive_loop())
             
             return True
             
         except Exception as e:
-            print(f"[EditorConnection] Connection failed: {e}")
+            _log(f"[EditorConnection] Connection failed: {e}")
             self._close_socket()
             self._set_state(EditorState.DISCONNECTED)
             return False
@@ -237,7 +246,7 @@ class EditorConnection:
                     self._recv_buffer += data
                     await self._parse_messages()
                 elif data == b"":
-                    print("[EditorConnection] TCP connection closed - Editor disconnected or crashed")
+                    _log("[EditorConnection] TCP connection closed - Editor disconnected or crashed")
                     self.disconnect()
                     break
                     
@@ -246,19 +255,19 @@ class EditorConnection:
             except asyncio.CancelledError:
                 break
             except ConnectionResetError:
-                print("[EditorConnection] Connection reset - Editor crashed")
+                _log("[EditorConnection] Connection reset - Editor crashed")
                 self.disconnect()
                 break
             except ConnectionAbortedError:
-                print("[EditorConnection] Connection aborted - Editor terminated")
+                _log("[EditorConnection] Connection aborted - Editor terminated")
                 self.disconnect()
                 break
             except OSError as e:
-                print(f"[EditorConnection] OS error: {e}")
+                _log(f"[EditorConnection] OS error: {e}")
                 self.disconnect()
                 break
             except Exception as e:
-                print(f"[EditorConnection] Receive error: {e}")
+                _log(f"[EditorConnection] Receive error: {e}")
                 self.disconnect()
                 break
     
@@ -277,15 +286,15 @@ class EditorConnection:
                 message = json.loads(msg_data.decode('utf-8'))
                 await self._handle_message(message)
             except json.JSONDecodeError as e:
-                print(f"[EditorConnection] JSON decode error: {e}")
+                _log(f"[EditorConnection] JSON decode error: {e}")
     
     async def _handle_message(self, message: Dict[str, Any]):
         """处理接收到的消息"""
         request_id = message.get("id")
         
         if self.debug:
-            print(f"[DEBUG][EditorConnection] Received message: id={request_id}, type={message.get('type')}")
-            print(f"[DEBUG][EditorConnection] Message content: {json.dumps(message, indent=2, ensure_ascii=False)[:500]}")
+            _log(f"[DEBUG][EditorConnection] Received message: id={request_id}, type={message.get('type')}")
+            _log(f"[DEBUG][EditorConnection] Message content: {json.dumps(message, indent=2, ensure_ascii=False)[:500]}")
         
         if request_id and request_id in self._pending_requests:
             future = self._pending_requests.pop(request_id)
@@ -318,8 +327,8 @@ class EditorConnection:
             request["id"] = request_id
             
             if self.debug:
-                print(f"[DEBUG][EditorConnection] Sending request: id={request_id}, type={request.get('type')}")
-                print(f"[DEBUG][EditorConnection] Request content: {json.dumps(request, indent=2, ensure_ascii=False)[:500]}")
+                _log(f"[DEBUG][EditorConnection] Sending request: id={request_id}, type={request.get('type')}")
+                _log(f"[DEBUG][EditorConnection] Request content: {json.dumps(request, indent=2, ensure_ascii=False)[:500]}")
             
             future = asyncio.get_event_loop().create_future()
             self._pending_requests[request_id] = future
@@ -337,7 +346,7 @@ class EditorConnection:
                 response = await asyncio.wait_for(future, timeout=timeout)
                 
                 if self.debug:
-                    print(f"[DEBUG][EditorConnection] Received response for {request_id}")
+                    _log(f"[DEBUG][EditorConnection] Received response for {request_id}")
                 
                 return response
                 
@@ -403,7 +412,7 @@ class EditorConnection:
         """
         try:
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Checking file: {file_path}")
+                _log(f"[DEBUG][TypeCheck] Checking file: {file_path}")
             
             # 检查文件是否存在
             if not os.path.exists(file_path):
@@ -415,7 +424,7 @@ class EditorConnection:
             
             # 直接对文件运行mypy检查
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Running mypy on file...")
+                _log(f"[DEBUG][TypeCheck] Running mypy on file...")
             
             result = subprocess.run(
                 [sys.executable, '-m', 'mypy', '--no-error-summary', '--show-error-codes', file_path],
@@ -425,16 +434,16 @@ class EditorConnection:
             )
             
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Mypy return code: {result.returncode}")
+                _log(f"[DEBUG][TypeCheck] Mypy return code: {result.returncode}")
                 if result.stdout:
-                    print(f"[DEBUG][TypeCheck] Mypy stdout:\n{result.stdout}")
+                    _log(f"[DEBUG][TypeCheck] Mypy stdout:\n{result.stdout}")
                 if result.stderr:
-                    print(f"[DEBUG][TypeCheck] Mypy stderr:\n{result.stderr}")
+                    _log(f"[DEBUG][TypeCheck] Mypy stderr:\n{result.stderr}")
             
             # 解析结果
             if result.returncode == 0:
                 if self.debug:
-                    print(f"[DEBUG][TypeCheck] Type check passed")
+                    _log(f"[DEBUG][TypeCheck] Type check passed")
                 return {
                     "success": True,
                     "errors": [],
@@ -450,9 +459,9 @@ class EditorConnection:
                     errors = [line.strip() for line in error_lines if line.strip()]
                 
                 if self.debug:
-                    print(f"[DEBUG][TypeCheck] Type check failed with {len(errors)} error(s)")
+                    _log(f"[DEBUG][TypeCheck] Type check failed with {len(errors)} error(s)")
                     for err in errors:
-                        print(f"[DEBUG][TypeCheck]   - {err}")
+                        _log(f"[DEBUG][TypeCheck]   - {err}")
                 
                 return {
                     "success": False,
@@ -462,7 +471,7 @@ class EditorConnection:
                 
         except subprocess.TimeoutExpired:
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Mypy check timed out")
+                _log(f"[DEBUG][TypeCheck] Mypy check timed out")
             return {
                 "success": False,
                 "errors": ["Mypy check timed out"],
@@ -470,8 +479,8 @@ class EditorConnection:
             }
         except FileNotFoundError:
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Mypy not found in current Python environment")
-                print(f"[DEBUG][TypeCheck] Current Python: {sys.executable}")
+                _log(f"[DEBUG][TypeCheck] Mypy not found in current Python environment")
+                _log(f"[DEBUG][TypeCheck] Current Python: {sys.executable}")
             return {
                 "success": False,
                 "errors": [
@@ -487,7 +496,7 @@ class EditorConnection:
             }
         except Exception as e:
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Type check error: {e}")
+                _log(f"[DEBUG][TypeCheck] Type check error: {e}")
             return {
                 "success": False,
                 "errors": [f"Type check error: {str(e)}"],
@@ -516,11 +525,11 @@ class EditorConnection:
         """
         try:
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Checking code snippet (length: {len(code)} chars)")
+                _log(f"[DEBUG][TypeCheck] Checking code snippet (length: {len(code)} chars)")
             
             # 1. 获取已导入的模块
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Fetching imported modules from editor...")
+                _log(f"[DEBUG][TypeCheck] Fetching imported modules from editor...")
             
             modules_result = await self.get_imported_modules(
                 include_stdlib=False, 
@@ -529,19 +538,19 @@ class EditorConnection:
             )
             
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Modules result success: {modules_result.get('success')}")
+                _log(f"[DEBUG][TypeCheck] Modules result success: {modules_result.get('success')}")
                 if modules_result.get('success'):
                     raw_output = modules_result.get('output', '')
-                    print(f"[DEBUG][TypeCheck] Raw modules output ({len(raw_output)} chars):")
-                    print("--- Raw Output Start ---")
-                    print(repr(raw_output))  # 使用repr显示转义字符
-                    print("--- Raw Output End ---")
+                    _log(f"[DEBUG][TypeCheck] Raw modules output ({len(raw_output)} chars):")
+                    _log("--- Raw Output Start ---")
+                    _log(repr(raw_output))  # 使用repr显示转义字符
+                    _log("--- Raw Output End ---")
                 else:
-                    print(f"[DEBUG][TypeCheck] Modules error: {modules_result.get('error')}")
+                    _log(f"[DEBUG][TypeCheck] Modules error: {modules_result.get('error')}")
             
             if not modules_result.get('success'):
                 if self.debug:
-                    print(f"[DEBUG][TypeCheck] Failed to get modules: {modules_result.get('error')}")
+                    _log(f"[DEBUG][TypeCheck] Failed to get modules: {modules_result.get('error')}")
                 return {
                     "success": False,
                     "errors": [f"Failed to get imported modules: {modules_result.get('error', 'Unknown error')}"],
@@ -553,8 +562,8 @@ class EditorConnection:
             full_code = f"{imports_code}\n\n# User code:\n{code}"
             
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Generated full code with {len(imports_code)} chars of imports")
-                print(f"[DEBUG][TypeCheck] Full code preview (first 500 chars):\n{full_code[:500]}")
+                _log(f"[DEBUG][TypeCheck] Generated full code with {len(imports_code)} chars of imports")
+                _log(f"[DEBUG][TypeCheck] Full code preview (first 500 chars):\n{full_code[:500]}")
             
             # 3. 创建临时文件
             with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False, encoding='utf-8') as temp_file:
@@ -562,16 +571,16 @@ class EditorConnection:
                 temp_file_path = temp_file.name
             
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Created temp file: {temp_file_path}")
-                print(f"[DEBUG][TypeCheck] Temp file content ({len(full_code)} chars):")
-                print("=" * 40)
-                print(full_code)
-                print("=" * 40)
+                _log(f"[DEBUG][TypeCheck] Created temp file: {temp_file_path}")
+                _log(f"[DEBUG][TypeCheck] Temp file content ({len(full_code)} chars):")
+                _log("=" * 40)
+                _log(full_code)
+                _log("=" * 40)
             
             try:
                 # 4. 运行mypy检查
                 if self.debug:
-                    print(f"[DEBUG][TypeCheck] Running mypy on temp file...")
+                    _log(f"[DEBUG][TypeCheck] Running mypy on temp file...")
                 
                 # 构建mypy命令
                 mypy_cmd = [
@@ -583,7 +592,7 @@ class EditorConnection:
                 # 添加排除路径（如果有配置）
                 for exclude_path in self.mypy_exclude_paths:
                     if self.debug:
-                        print(f"[DEBUG][TypeCheck] Excluding path: {exclude_path}")
+                        _log(f"[DEBUG][TypeCheck] Excluding path: {exclude_path}")
                     mypy_cmd.extend(['--exclude', f'{exclude_path}/.*'])
                 
                 mypy_cmd.append(temp_file_path)
@@ -596,16 +605,16 @@ class EditorConnection:
                 )
                 
                 if self.debug:
-                    print(f"[DEBUG][TypeCheck] Mypy return code: {result.returncode}")
+                    _log(f"[DEBUG][TypeCheck] Mypy return code: {result.returncode}")
                     if result.stdout:
-                        print(f"[DEBUG][TypeCheck] Mypy stdout:\n{result.stdout}")
+                        _log(f"[DEBUG][TypeCheck] Mypy stdout:\n{result.stdout}")
                     if result.stderr:
-                        print(f"[DEBUG][TypeCheck] Mypy stderr:\n{result.stderr}")
+                        _log(f"[DEBUG][TypeCheck] Mypy stderr:\n{result.stderr}")
                 
                 # 5. 解析结果
                 if result.returncode == 0:
                     if self.debug:
-                        print(f"[DEBUG][TypeCheck] Type check passed")
+                        _log(f"[DEBUG][TypeCheck] Type check passed")
                     return {
                         "success": True,
                         "errors": [],
@@ -623,9 +632,9 @@ class EditorConnection:
                             user_errors.append(clean_line)
                     
                     if self.debug:
-                        print(f"[DEBUG][TypeCheck] Type check failed with {len(user_errors)} error(s)")
+                        _log(f"[DEBUG][TypeCheck] Type check failed with {len(user_errors)} error(s)")
                         for err in user_errors:
-                            print(f"[DEBUG][TypeCheck]   - {err}")
+                            _log(f"[DEBUG][TypeCheck]   - {err}")
                     
                     return {
                         "success": False,
@@ -638,13 +647,13 @@ class EditorConnection:
                 try:
                     os.unlink(temp_file_path)
                     if self.debug:
-                        print(f"[DEBUG][TypeCheck] Cleaned up temp file")
+                        _log(f"[DEBUG][TypeCheck] Cleaned up temp file")
                 except OSError:
                     pass
                     
         except subprocess.TimeoutExpired:
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Mypy check timed out")
+                _log(f"[DEBUG][TypeCheck] Mypy check timed out")
             return {
                 "success": False,
                 "errors": ["Mypy check timed out"],
@@ -652,8 +661,8 @@ class EditorConnection:
             }
         except FileNotFoundError:
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Mypy not found in current Python environment")
-                print(f"[DEBUG][TypeCheck] Current Python: {sys.executable}")
+                _log(f"[DEBUG][TypeCheck] Mypy not found in current Python environment")
+                _log(f"[DEBUG][TypeCheck] Current Python: {sys.executable}")
             return {
                 "success": False,
                 "errors": [
@@ -669,7 +678,7 @@ class EditorConnection:
             }
         except Exception as e:
             if self.debug:
-                print(f"[DEBUG][TypeCheck] Type check error: {e}")
+                _log(f"[DEBUG][TypeCheck] Type check error: {e}")
             return {
                 "success": False,
                 "errors": [f"Type check error: {str(e)}"],
@@ -712,8 +721,12 @@ class MCPStandaloneServer:
     """
     独立MCP服务器
     
+    支持两种传输模式：
+    - stdio: 由MCP客户端自动拉起，通过stdin/stdout通信
+    - sse: 独立HTTP服务，通过SSE端点通信
+    
     功能：
-    1. 提供MCP SSE端点供外部客户端连接
+    1. 提供MCP端点供外部客户端连接
     2. 将请求转发到UE编辑器执行
     3. 自动管理与编辑器的连接（重连机制）
     """
@@ -732,8 +745,8 @@ class MCPStandaloneServer:
         初始化MCP服务器
         
         Args:
-            mcp_host: MCP服务监听地址
-            mcp_port: MCP服务监听端口
+            mcp_host: MCP服务监听地址（仅SSE模式使用）
+            mcp_port: MCP服务监听端口（仅SSE模式使用）
             editor_host: 编辑器转发服务器地址
             editor_port: 编辑器转发服务器端口
             debug: 是否开启调试模式
@@ -770,9 +783,9 @@ class MCPStandaloneServer:
     def _on_editor_state_change(self, old_state: EditorState, new_state: EditorState):
         """编辑器状态变化回调"""
         if new_state == EditorState.DISCONNECTED:
-            print("[MCPServer] WARNING: Editor disconnected (crashed or closed)")
+            _log("[MCPServer] WARNING: Editor disconnected (crashed or closed)")
         elif new_state == EditorState.CONNECTED:
-            print("[MCPServer] Editor connected and ready")
+            _log("[MCPServer] Editor connected and ready")
     
     def _on_editor_disconnected(self):
         """编辑器断连回调，触发重连"""
@@ -789,11 +802,11 @@ class MCPStandaloneServer:
                 pass
             
             if not self.editor_connection.is_connected:
-                print("[MCPServer] Attempting to connect to editor...")
+                _log("[MCPServer] Attempting to connect to editor...")
                 connected = await self.editor_connection.connect()
                 
                 if not connected:
-                    print(f"[MCPServer] Connection failed, retrying in {self.editor_connection.config.reconnect_interval}s...")
+                    _log(f"[MCPServer] Connection failed, retrying in {self.editor_connection.config.reconnect_interval}s...")
                     await asyncio.sleep(self.editor_connection.config.reconnect_interval)
     
     async def _handle_tool_call(self, name: str, arguments: dict) -> ExecutionResult:
@@ -808,8 +821,8 @@ class MCPStandaloneServer:
             ExecutionResult 执行结果
         """
         if self.debug:
-            print(f"[DEBUG][MCPServer] Tool call: {name}")
-            print(f"[DEBUG][MCPServer] Arguments: {json.dumps(arguments, indent=2, ensure_ascii=False)[:300]}")
+            _log(f"[DEBUG][MCPServer] Tool call: {name}")
+            _log(f"[DEBUG][MCPServer] Arguments: {json.dumps(arguments, indent=2, ensure_ascii=False)[:300]}")
         
         # 检查编辑器连接状态
         if not self.editor_connection.is_connected:
@@ -854,8 +867,8 @@ class MCPStandaloneServer:
         except Exception as e:
             if self.debug:
                 import traceback
-                print(f"[DEBUG][MCPServer] Tool call error: {e}")
-                print(f"[DEBUG][MCPServer] Traceback:\n{traceback.format_exc()}")
+                _log(f"[DEBUG][MCPServer] Tool call error: {e}")
+                _log(f"[DEBUG][MCPServer] Traceback:\n{traceback.format_exc()}")
             return ExecutionResult(success=False, error=str(e))
     
     def _parse_editor_response(self, result: Dict[str, Any]) -> ExecutionResult:
@@ -873,54 +886,103 @@ class MCPStandaloneServer:
                 logs=result.get('logs', '')
             )
     
-    async def run(self):
-        """运行MCP服务器"""
-        if not MCP_AVAILABLE:
-            print("ERROR: MCP library not available")
-            print("Please install: pip install mcp")
-            if MCP_IMPORT_ERRORS:
-                print("\nDetailed import errors:")
-                for error in MCP_IMPORT_ERRORS:
-                    print(f"  - {error}")
-            return
+    def _setup_mcp_app(self):
+        """
+        创建并配置 MCP 应用（工具注册）
         
-        if not STARLETTE_AVAILABLE:
-            print("ERROR: Starlette/Uvicorn not available")
-            print("Please install: pip install uvicorn starlette")
-            if STARLETTE_IMPORT_ERRORS:
-                print("\nDetailed import errors:")
-                for error in STARLETTE_IMPORT_ERRORS:
-                    print(f"  - {error}")
-            return
-        
-        self._running = True
-        
-        # 初始化MCP应用
+        Returns:
+            (mcp_app, initialization_options)
+        """
         mcp_app = Server("UE-MCP-Standalone")
-        sse = SseServerTransport("/messages/")
-        
-        # 保存self引用供闭包使用
         server_self = self
         
         @mcp_app.call_tool()
         async def call_tools(name: str, arguments: dict) -> list:
             if server_self.debug:
-                print(f"[DEBUG][MCPServer] MCP tool request: {name}")
+                _log(f"[DEBUG][MCPServer] MCP tool request: {name}")
             result = await server_self._handle_tool_call(name, arguments)
             return result.to_mcp_content()
         
         @mcp_app.list_tools()
         async def list_tools() -> list:
-            return get_mcp_tools(self.TOOLS)
+            return get_mcp_tools(server_self.TOOLS)
+        
+        initialization_options = mcp_app.create_initialization_options()
+        return mcp_app, initialization_options
+    
+    async def run_stdio(self):
+        """以 stdio 模式运行 MCP 服务器（由 MCP 客户端自动拉起）"""
+        if not MCP_AVAILABLE:
+            _log("ERROR: MCP library not available")
+            _log("Please install: pip install mcp")
+            if MCP_IMPORT_ERRORS:
+                _log("\nDetailed import errors:")
+                for error in MCP_IMPORT_ERRORS:
+                    _log(f"  - {error}")
+            return
+        
+        if stdio_server is None:
+            _log("ERROR: stdio_server not available (mcp.server.stdio import failed)")
+            return
+        
+        self._running = True
+        
+        mcp_app, initialization_options = self._setup_mcp_app()
+        
+        # 启动重连循环
+        self._tasks.append(asyncio.create_task(self._reconnect_loop()))
+        
+        # 尝试初始连接
+        _log("[MCPServer] Attempting initial connection to editor...")
+        await self.editor_connection.connect()
+        
+        _log("[MCPServer] MCP Server starting in stdio mode")
+        
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                _log("[MCPServer] stdio transport ready")
+                await mcp_app.run(
+                    read_stream,
+                    write_stream,
+                    initialization_options,
+                )
+        except Exception as e:
+            _log(f"[MCPServer] stdio server error: {e}")
+        finally:
+            await self.stop()
+    
+    async def run_sse(self):
+        """以 SSE 模式运行 MCP 服务器（独立 HTTP 服务）"""
+        if not MCP_AVAILABLE:
+            _log("ERROR: MCP library not available")
+            _log("Please install: pip install mcp")
+            if MCP_IMPORT_ERRORS:
+                _log("\nDetailed import errors:")
+                for error in MCP_IMPORT_ERRORS:
+                    _log(f"  - {error}")
+            return
+        
+        if not STARLETTE_AVAILABLE:
+            _log("ERROR: Starlette/Uvicorn not available")
+            _log("Please install: pip install uvicorn starlette")
+            if STARLETTE_IMPORT_ERRORS:
+                _log("\nDetailed import errors:")
+                for error in STARLETTE_IMPORT_ERRORS:
+                    _log(f"  - {error}")
+            return
+        
+        self._running = True
+        
+        mcp_app, initialization_options = self._setup_mcp_app()
+        sse = SseServerTransport("/messages/")
         
         async def handle_sse(request):
-            print("[MCPServer] SSE connection starting")
-            initialization_options = mcp_app.create_initialization_options()
+            _log("[MCPServer] SSE connection starting")
             
             async with sse.connect_sse(
                 request.scope, request.receive, request._send
             ) as streams:
-                print("[MCPServer] SSE connected")
+                _log("[MCPServer] SSE connected")
                 try:
                     await mcp_app.run(
                         streams[0],
@@ -928,7 +990,7 @@ class MCPStandaloneServer:
                         initialization_options,
                     )
                 except Exception as e:
-                    print(f"[MCPServer] MCP server error: {e}")
+                    _log(f"[MCPServer] MCP server error: {e}")
                     raise
         
         # 配置CORS中间件
@@ -943,9 +1005,9 @@ class MCPStandaloneServer:
                     allow_headers=["*"],
                 )
             )
-            print("[MCPServer] CORS middleware enabled")
+            _log("[MCPServer] CORS middleware enabled")
         else:
-            print("[MCPServer] WARNING: CORS middleware not available")
+            _log("[MCPServer] WARNING: CORS middleware not available")
         
         web_app = Starlette(
             routes=[
@@ -959,7 +1021,7 @@ class MCPStandaloneServer:
         self._tasks.append(asyncio.create_task(self._reconnect_loop()))
         
         # 尝试初始连接
-        print("[MCPServer] Attempting initial connection to editor...")
+        _log("[MCPServer] Attempting initial connection to editor...")
         await self.editor_connection.connect()
         
         # 启动HTTP服务器
@@ -971,17 +1033,21 @@ class MCPStandaloneServer:
         )
         server = uvicorn.Server(config)
         
-        print(f"[MCPServer] MCP Server starting on http://{self.mcp_host}:{self.mcp_port}")
-        print(f"[MCPServer] SSE endpoint: http://{self.mcp_host}:{self.mcp_port}/SSE")
+        _log(f"[MCPServer] MCP Server starting on http://{self.mcp_host}:{self.mcp_port}")
+        _log(f"[MCPServer] SSE endpoint: http://{self.mcp_host}:{self.mcp_port}/SSE")
         
         try:
             await server.serve()
         finally:
             await self.stop()
     
+    async def run(self):
+        """运行MCP服务器（SSE模式，向后兼容）"""
+        await self.run_sse()
+    
     async def stop(self):
         """停止服务器"""
-        print("[MCPServer] Stopping...")
+        _log("[MCPServer] Stopping...")
         self._running = False
         
         self.editor_connection.disconnect()
@@ -995,7 +1061,7 @@ class MCPStandaloneServer:
                     pass
         
         self._tasks.clear()
-        print("[MCPServer] Stopped")
+        _log("[MCPServer] Stopped")
 
 
 def main():
@@ -1010,10 +1076,29 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # stdio 模式（默认，由 MCP 客户端自动拉起）
   python MCPStandalone.py
-  python MCPStandalone.py --mcp-port 8099 --editor-port 8100
-  python MCPStandalone.py --mcp-host 0.0.0.0 --mcp-port 8099
+  python MCPStandalone.py --editor-port 8100
+
+  # SSE 模式（手动启动，独立 HTTP 服务）
+  python MCPStandalone.py --transport sse --mcp-port 8099
+  python MCPStandalone.py --transport sse --mcp-host 0.0.0.0 --mcp-port 8099
+
+  # 调试模式
   python MCPStandalone.py --debug
+
+Transport Modes:
+  stdio (default):
+    - Launched automatically by MCP clients (Claude Desktop, Cursor, etc.)
+    - Communicates via stdin/stdout (JSON-RPC)
+    - Logs go to stderr
+    - No port needed for MCP service
+
+  sse:
+    - Standalone HTTP server with SSE endpoint
+    - Must be started manually
+    - Clients connect to http://<host>:<port>/SSE
+    - Requires uvicorn and starlette
 
 Configuration:
   Port settings can be configured via:
@@ -1022,13 +1107,6 @@ Configuration:
   3. .env file in the plugin root directory
   4. Default values
 
-Debug Mode:
-  Use --debug flag to enable detailed logging of:
-  - Type checking process and results
-  - Network requests and responses
-  - Editor connection state changes
-  - Error tracebacks
-
 Note:
   This server connects to a UE Editor running the MCPForwarder plugin.
   The TCP connection state is used to detect editor crashes.
@@ -1036,10 +1114,12 @@ Note:
   and this server will automatically attempt to reconnect.
         """
     )
+    parser.add_argument('--transport', choices=['stdio', 'sse'], default='stdio',
+                        help='Transport mode: stdio (default) or sse')
     parser.add_argument('--mcp-host', default=None, 
-                        help=f'MCP server listen host (default: {config["mcp_host"]})')
+                        help=f'MCP server listen host, SSE mode only (default: {config["mcp_host"]})')
     parser.add_argument('--mcp-port', type=int, default=None, 
-                        help=f'MCP server listen port (default: {config["mcp_port"]})')
+                        help=f'MCP server listen port, SSE mode only (default: {config["mcp_port"]})')
     parser.add_argument('--editor-host', default=None, 
                         help=f'Editor forwarder host (default: {config["editor_host"]})')
     parser.add_argument('--editor-port', type=int, default=None, 
@@ -1055,27 +1135,30 @@ Note:
     editor_host = args.editor_host if args.editor_host is not None else config["editor_host"]
     editor_port = args.editor_port if args.editor_port is not None else config["editor_port"]
     debug = args.debug
+    transport = args.transport
     
-    print("=" * 60)
-    print("MCP Standalone Server for Unreal Engine")
-    print("=" * 60)
-    print(f"MCP Server: {mcp_host}:{mcp_port}")
-    print(f"Editor Forwarder: {editor_host}:{editor_port}")
-    print(f"Debug Mode: {'ENABLED' if debug else 'disabled'}")
-    print("=" * 60)
-    print()
-    print("Connection detection: TCP connection state")
-    print("- TCP connected = Editor running")
-    print("- TCP disconnected = Editor crashed/closed")
-    print("- Automatic reconnection enabled")
+    _log("=" * 60)
+    _log("MCP Standalone Server for Unreal Engine")
+    _log("=" * 60)
+    _log(f"Transport: {transport}")
+    if transport == 'sse':
+        _log(f"MCP Server: {mcp_host}:{mcp_port}")
+    _log(f"Editor Forwarder: {editor_host}:{editor_port}")
+    _log(f"Debug Mode: {'ENABLED' if debug else 'disabled'}")
+    _log("=" * 60)
+    _log()
+    _log("Connection detection: TCP connection state")
+    _log("- TCP connected = Editor running")
+    _log("- TCP disconnected = Editor crashed/closed")
+    _log("- Automatic reconnection enabled")
     if debug:
-        print()
-        print("Debug mode enabled - detailed logging active:")
-        print("  * Type checking process details")
-        print("  * Network request/response content")
-        print("  * State transition logging")
-        print("  * Error tracebacks")
-    print()
+        _log()
+        _log("Debug mode enabled - detailed logging active:")
+        _log("  * Type checking process details")
+        _log("  * Network request/response content")
+        _log("  * State transition logging")
+        _log("  * Error tracebacks")
+    _log()
     
     server = MCPStandaloneServer(
         mcp_host=mcp_host,
@@ -1086,9 +1169,12 @@ Note:
     )
     
     try:
-        asyncio.run(server.run())
+        if transport == 'stdio':
+            asyncio.run(server.run_stdio())
+        else:
+            asyncio.run(server.run_sse())
     except KeyboardInterrupt:
-        print("\n[MCPServer] Interrupted by user")
+        _log("\n[MCPServer] Interrupted by user")
 
 
 if __name__ == "__main__":

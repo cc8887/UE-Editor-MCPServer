@@ -14,7 +14,7 @@ mcp_server - UE Editor MCP Server 核心模块
 from .MCPCore import (
     MCP_AVAILABLE, MCP_IMPORT_ERRORS,
     STARLETTE_AVAILABLE, STARLETTE_IMPORT_ERRORS,
-    types, Server, SseServerTransport,
+    types, Server, SseServerTransport, stdio_server,
     uvicorn, Starlette, Mount, Route,
     ToolDefinition, ExecutionResult,
     TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE,
@@ -32,7 +32,7 @@ __all__ = [
     # MCPCore (不依赖unreal)
     'MCP_AVAILABLE', 'MCP_IMPORT_ERRORS',
     'STARLETTE_AVAILABLE', 'STARLETTE_IMPORT_ERRORS',
-    'types', 'Server', 'SseServerTransport',
+    'types', 'Server', 'SseServerTransport', 'stdio_server',
     'uvicorn', 'Starlette', 'Mount', 'Route',
     'ToolDefinition', 'ExecutionResult',
     'TOOL_EXECUTE_COMMAND', 'TOOL_EXECUTE_FILE', 'TOOL_GET_EDITOR_STATE',
