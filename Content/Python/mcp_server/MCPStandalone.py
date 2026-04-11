@@ -1146,19 +1146,19 @@ Note:
     _log(f"Editor Forwarder: {editor_host}:{editor_port}")
     _log(f"Debug Mode: {'ENABLED' if debug else 'disabled'}")
     _log("=" * 60)
-    _log()
+    _log("")
     _log("Connection detection: TCP connection state")
     _log("- TCP connected = Editor running")
     _log("- TCP disconnected = Editor crashed/closed")
     _log("- Automatic reconnection enabled")
     if debug:
-        _log()
+        _log("")
         _log("Debug mode enabled - detailed logging active:")
         _log("  * Type checking process details")
         _log("  * Network request/response content")
         _log("  * State transition logging")
         _log("  * Error tracebacks")
-    _log()
+    _log("")
     
     server = MCPStandaloneServer(
         mcp_host=mcp_host,
