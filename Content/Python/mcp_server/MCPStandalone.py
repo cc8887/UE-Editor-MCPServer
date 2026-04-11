@@ -98,7 +98,8 @@ class EditorConnection:
     
     def __init__(self, host: str = "127.0.0.1", port: int = 8100, 
                  config: ConnectionConfig = None, debug: bool = False,
-                 mypy_exclude_paths: List[str] = None):
+                 mypy_exclude_paths: List[str] = None,
+                 mypy_enabled: bool = False):
         """
         初始化编辑器连接
         
@@ -108,6 +109,7 @@ class EditorConnection:
             config: 连接配置
             debug: 是否开启调试模式
             mypy_exclude_paths: MyPy检查时要排除的目录列表（绝对路径）
+            mypy_enabled: 是否启用mypy类型检查（需配置MYPY_ENABLED=true）
         """
         self.host = host
         self.port = port
@@ -115,10 +117,14 @@ class EditorConnection:
         self.debug = debug
         self.mypy_exclude_paths = mypy_exclude_paths or []
         
-        # 检测 mypy 是否可用
-        self._mypy_available = self._check_mypy_available()
-        if not self._mypy_available:
-            _log("[EditorConnection] WARNING: mypy not available in system Python, type checking will be skipped")
+        # mypy 类型检查：需配置开启 + mypy 实际可用
+        if mypy_enabled:
+            self._mypy_available = self._check_mypy_available()
+            if not self._mypy_available:
+                _log("[EditorConnection] WARNING: MYPY_ENABLED=true but mypy not installed in system Python")
+        else:
+            self._mypy_available = False
+            _log("[EditorConnection] mypy type checking disabled (MYPY_ENABLED=false)")
         
         self._socket: Optional[socket.socket] = None
         self._state = EditorState.DISCONNECTED
@@ -758,7 +764,8 @@ class MCPStandaloneServer:
                  editor_host: str = "127.0.0.1",
                  editor_port: int = 8100,
                  debug: bool = False,
-                 mypy_exclude_paths: List[str] = None):
+                 mypy_exclude_paths: List[str] = None,
+                 mypy_enabled: bool = False):
         """
         初始化MCP服务器
         
@@ -769,6 +776,7 @@ class MCPStandaloneServer:
             editor_port: 编辑器转发服务器端口
             debug: 是否开启调试模式
             mypy_exclude_paths: MyPy检查时要排除的目录列表（绝对路径）
+            mypy_enabled: 是否启用mypy类型检查
         """
         self.mcp_host = mcp_host
         self.mcp_port = mcp_port
@@ -789,7 +797,8 @@ class MCPStandaloneServer:
         self.editor_connection = EditorConnection(
             editor_host, editor_port, 
             debug=debug,
-            mypy_exclude_paths=mypy_exclude_paths
+            mypy_exclude_paths=mypy_exclude_paths,
+            mypy_enabled=mypy_enabled
         )
         self.editor_connection.on_state_change = self._on_editor_state_change
         self.editor_connection.on_disconnected = self._on_editor_disconnected
@@ -1144,6 +1153,8 @@ Note:
                         help=f'Editor forwarder port (default: {config["editor_port"]})')
     parser.add_argument('--debug', action='store_true', default=False,
                         help='Enable debug mode for detailed logging')
+    parser.add_argument('--mypy-enabled', action='store_true', default=None,
+                        help='Enable mypy type checking (default: from config, usually disabled)')
     
     args = parser.parse_args()
     
@@ -1154,6 +1165,7 @@ Note:
     editor_port = args.editor_port if args.editor_port is not None else config["editor_port"]
     debug = args.debug
     transport = args.transport
+    mypy_enabled = args.mypy_enabled if args.mypy_enabled is not None else config.get("mypy_enabled", False)
     
     _log("=" * 60)
     _log("MCP Standalone Server for Unreal Engine")
@@ -1163,6 +1175,7 @@ Note:
         _log(f"MCP Server: {mcp_host}:{mcp_port}")
     _log(f"Editor Forwarder: {editor_host}:{editor_port}")
     _log(f"Debug Mode: {'ENABLED' if debug else 'disabled'}")
+    _log(f"MyPy Type Check: {'ENABLED' if mypy_enabled else 'disabled'}")
     _log("=" * 60)
     _log("")
     _log("Connection detection: TCP connection state")
@@ -1183,7 +1196,8 @@ Note:
         mcp_port=mcp_port,
         editor_host=editor_host,
         editor_port=editor_port,
-        debug=debug
+        debug=debug,
+        mypy_enabled=mypy_enabled
     )
     
     try:

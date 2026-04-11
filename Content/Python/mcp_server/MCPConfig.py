@@ -25,6 +25,9 @@ DEFAULT_EDITOR_PORT = 8100
 DEFAULT_EDITOR_HOST = "127.0.0.1"
 
 
+DEFAULT_MYPY_ENABLED = False
+
+
 def _find_env_file() -> Optional[str]:
     """
     查找.env文件
@@ -161,6 +164,10 @@ def load_config(force_reload: bool = False) -> dict:
     mcp_host = _get_config_value("MCP_HOST", DEFAULT_MCP_HOST, env_config)
     editor_port_str = _get_config_value("EDITOR_PORT", str(DEFAULT_EDITOR_PORT), env_config)
     editor_host = _get_config_value("EDITOR_HOST", DEFAULT_EDITOR_HOST, env_config)
+    mypy_enabled_str = _get_config_value("MYPY_ENABLED", str(DEFAULT_MYPY_ENABLED), env_config)
+    
+    # 解析布尔值
+    mypy_enabled = mypy_enabled_str.lower() in ("true", "1", "yes")
     
     # 解析端口号
     try:
@@ -180,11 +187,13 @@ def load_config(force_reload: bool = False) -> dict:
         "mcp_host": mcp_host,
         "editor_port": editor_port,
         "editor_host": editor_host,
+        "mypy_enabled": mypy_enabled,
     }
     
     print(f"[MCPConfig] Configuration loaded:")
     print(f"  MCP Server: {mcp_host}:{mcp_port}")
     print(f"  Editor Forwarder: {editor_host}:{editor_port}")
+    print(f"  MyPy Enabled: {mypy_enabled}")
     
     return _config_cache
 
