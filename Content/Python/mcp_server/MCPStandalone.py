@@ -115,6 +115,11 @@ class EditorConnection:
         self.debug = debug
         self.mypy_exclude_paths = mypy_exclude_paths or []
         
+        # 检测 mypy 是否可用
+        self._mypy_available = self._check_mypy_available()
+        if not self._mypy_available:
+            _log("[EditorConnection] WARNING: mypy not available in system Python, type checking will be skipped")
+        
         self._socket: Optional[socket.socket] = None
         self._state = EditorState.DISCONNECTED
         self._request_counter = 0
@@ -369,6 +374,17 @@ class EditorConnection:
         except Exception:
             return False
     
+    def _check_mypy_available(self) -> bool:
+        """检测系统 Python 中 mypy 是否可用"""
+        try:
+            result = subprocess.run(
+                [sys.executable, '-m', 'mypy', '--version'],
+                capture_output=True, text=True, timeout=5
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+    
     async def execute_file(self, file_path: str, timeout: float = None) -> Dict[str, Any]:
         """
         执行Python文件（自动进行mypy类型检查）
@@ -380,21 +396,22 @@ class EditorConnection:
         Returns:
             执行结果字典
         """
-        # 先进行mypy类型检查
-        type_check_result = await self._check_file_with_mypy(file_path)
+        # mypy 可用时进行类型检查，不可用时跳过
+        if self._mypy_available:
+            type_check_result = await self._check_file_with_mypy(file_path)
+            
+            if not type_check_result["success"]:
+                # 类型检查失败，直接返回错误，不执行文件
+                return {
+                    "type": "result",
+                    "success": False,
+                    "output": None,
+                    "error": f"Type check failed:\n" + "\n".join(type_check_result["errors"]),
+                    "logs": None,
+                    "type_check": type_check_result
+                }
         
-        if not type_check_result["success"]:
-            # 类型检查失败，直接返回错误，不执行文件
-            return {
-                "type": "result",
-                "success": False,
-                "output": None,
-                "error": f"Type check failed:\n" + "\n".join(type_check_result["errors"]),
-                "logs": None,
-                "type_check": type_check_result
-            }
-        
-        # 类型检查通过，执行文件
+        # 类型检查通过或跳过，执行文件
         return await self.send_request({
             "type": "execute_file",
             "file": file_path
@@ -687,7 +704,7 @@ class EditorConnection:
     
     async def execute_code(self, code: str, timeout: float = None) -> Dict[str, Any]:
         """
-        执行Python代码（自动进行mypy类型检查）
+        执行Python代码（mypy可用时自动进行类型检查）
         
         Args:
             code: 要执行的Python代码
@@ -696,21 +713,22 @@ class EditorConnection:
         Returns:
             执行结果字典
         """
-        # 先进行mypy类型检查
-        type_check_result = await self._check_code_with_mypy(code)
+        # mypy 可用时进行类型检查，不可用时跳过
+        if self._mypy_available:
+            type_check_result = await self._check_code_with_mypy(code)
+            
+            if not type_check_result["success"]:
+                # 类型检查失败，直接返回错误，不执行代码
+                return {
+                    "type": "result",
+                    "success": False,
+                    "output": None,
+                    "error": f"Type check failed:\n" + "\n".join(type_check_result["errors"]),
+                    "logs": None,
+                    "type_check": type_check_result
+                }
         
-        if not type_check_result["success"]:
-            # 类型检查失败，直接返回错误，不执行代码
-            return {
-                "type": "result",
-                "success": False,
-                "output": None,
-                "error": f"Type check failed:\n" + "\n".join(type_check_result["errors"]),
-                "logs": None,
-                "type_check": type_check_result
-            }
-        
-        # 类型检查通过，执行代码
+        # 类型检查通过或跳过，执行代码
         return await self.send_request({
             "type": "execute",
             "code": code
