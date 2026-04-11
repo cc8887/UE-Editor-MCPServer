@@ -82,7 +82,7 @@ class ConnectionConfig:
     """连接配置"""
     reconnect_interval: float = 2.0      # 重连间隔（秒）
     connect_timeout: float = 5.0         # 连接超时（秒）
-    request_timeout: float = 60.0        # 请求超时（秒）
+    request_timeout: float = 86400.0     # 请求超时（秒），默认24小时
     recv_buffer_size: int = 65536        # 接收缓冲区大小
 
 
