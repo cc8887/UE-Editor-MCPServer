@@ -84,6 +84,7 @@ class ConnectionConfig:
     connect_timeout: float = 5.0         # 连接超时（秒）
     request_timeout: float = 86400.0     # 请求超时（秒），默认24小时
     recv_buffer_size: int = 65536        # 接收缓冲区大小
+    rejected_backoff: float = 30.0       # 被拒绝后的退避时间（秒），避免刷日志
 
 
 class EditorConnection:
@@ -133,6 +134,7 @@ class EditorConnection:
         self._recv_buffer = b""
         self._lock = asyncio.Lock()
         self._receive_task: Optional[asyncio.Task] = None
+        self._rejected = False  # 是否被服务端拒绝（已有其他客户端连接）
         
         # 状态变化回调
         self.on_state_change: Optional[Callable[[EditorState, EditorState], None]] = None
@@ -180,6 +182,7 @@ class EditorConnection:
         if self._socket:
             return True
         
+        self._rejected = False  # 重置拒绝标记
         self._set_state(EditorState.CONNECTING)
         
         try:
@@ -306,6 +309,13 @@ class EditorConnection:
         if self.debug:
             _log(f"[DEBUG][EditorConnection] Received message: id={request_id}, type={message.get('type')}")
             _log(f"[DEBUG][EditorConnection] Message content: {json.dumps(message, indent=2, ensure_ascii=False)[:500]}")
+        
+        # 检测服务端拒绝消息（已有其他客户端连接）
+        if message.get("type") == "error" and "rejected" in message.get("error", "").lower():
+            _log(f"[EditorConnection] Connection rejected by editor: {message.get('error')}")
+            self._rejected = True
+            self.disconnect()
+            return
         
         if request_id and request_id in self._pending_requests:
             future = self._pending_requests.pop(request_id)
@@ -829,12 +839,27 @@ class MCPStandaloneServer:
                 pass
             
             if not self.editor_connection.is_connected:
+                # 被拒绝时使用更长的退避时间，避免刷日志
+                if self.editor_connection._rejected:
+                    backoff = self.editor_connection.config.rejected_backoff
+                    _log(f"[MCPServer] Connection rejected (another client connected), backing off {backoff}s...")
+                    await asyncio.sleep(backoff)
+                    self.editor_connection._rejected = False
+                    continue
+                
                 _log("[MCPServer] Attempting to connect to editor...")
                 connected = await self.editor_connection.connect()
                 
                 if not connected:
-                    _log(f"[MCPServer] Connection failed, retrying in {self.editor_connection.config.reconnect_interval}s...")
-                    await asyncio.sleep(self.editor_connection.config.reconnect_interval)
+                    # 连接被拒绝时检查是否是 rejection
+                    if self.editor_connection._rejected:
+                        backoff = self.editor_connection.config.rejected_backoff
+                        _log(f"[MCPServer] Connection rejected, backing off {backoff}s...")
+                        await asyncio.sleep(backoff)
+                        self.editor_connection._rejected = False
+                    else:
+                        _log(f"[MCPServer] Connection failed, retrying in {self.editor_connection.config.reconnect_interval}s...")
+                        await asyncio.sleep(self.editor_connection.config.reconnect_interval)
     
     async def _handle_tool_call(self, name: str, arguments: dict) -> ExecutionResult:
         """

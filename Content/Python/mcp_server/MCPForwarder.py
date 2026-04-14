@@ -141,7 +141,7 @@ class MCPForwarder:
     def _accept_connection(self):
         """
         接受新连接（非阻塞）
-        只允许一个客户端连接，新连接会替换旧连接
+        只允许一个客户端连接，已有连接时拒绝新连接（避免乒乓踢人风暴）
         """
         if self._server_socket is None:
             return
@@ -149,10 +149,26 @@ class MCPForwarder:
         try:
             client, addr = self._server_socket.accept()
             
-            # 如果已有连接，先关闭旧连接
+            # 如果已有连接，拒绝新连接（避免两个客户端互相踢导致连接风暴）
             if self._client_socket is not None:
-                self._log(f"MCPForwarder: Closing existing connection, new client from {addr}")
-                self._close_client()
+                self._log(f"MCPForwarder: Rejecting new client from {addr}, existing client connected")
+                try:
+                    # 发送拒绝消息给新客户端
+                    reject_msg = json.dumps({
+                        "type": "error",
+                        "id": "system",
+                        "error": "Another client is already connected. Connection rejected."
+                    }).encode('utf-8')
+                    length_prefix = len(reject_msg).to_bytes(4, 'big')
+                    client.sendall(length_prefix + reject_msg)
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                return
             
             # 设置新连接为非阻塞
             client.setblocking(False)
