@@ -9,6 +9,7 @@ UE4 MCP Forwarder - 编辑器内转发服务器
 - 使用TCP连接状态来检测编辑器崩溃，正常情况下TCP连接不会主动断开
 - 外部MCP进程通过检测TCP断连来判断编辑器是否崩溃
 - 转发服务器完全由编辑器tick驱动，不阻塞主线程
+- 支持多客户端同时连接，每个客户端独立收发
 """
 
 import json
@@ -42,6 +43,11 @@ class MCPForwarder:
       - execute: 执行Python代码
       - execute_file: 执行Python文件
       - result: 执行结果
+    
+    多客户端支持：
+    - 多个MCPStandalone可同时连接同一端口
+    - 每个客户端有独立的接收缓冲区
+    - 请求执行完后，响应回发给发起请求的客户端
     """
     
     # 默认配置
@@ -60,11 +66,13 @@ class MCPForwarder:
         self.port = port or self.DEFAULT_PORT
         
         self._server_socket: Optional[socket.socket] = None
-        self._client_socket: Optional[socket.socket] = None
+        # 多客户端：socket -> recv_buffer
+        self._clients: Dict[socket.socket, bytes] = {}
         self._state = ForwarderState.IDLE
-        self._pending_requests: List[Dict[str, Any]] = []
-        self._pending_responses: List[Dict[str, Any]] = []
-        self._recv_buffer = b""
+        # 待处理请求，每项带客户端标识：(client_socket, message)
+        self._pending_requests: List[tuple] = []
+        # 待发送响应，每项带客户端标识：(client_socket, response)
+        self._pending_responses: List[tuple] = []
         self._is_running = False
         self._last_tick_time = time.time()
         
@@ -94,7 +102,7 @@ class MCPForwarder:
             # 设置为非阻塞模式
             self._server_socket.setblocking(False)
             self._server_socket.bind((self.host, self.port))
-            self._server_socket.listen(1)
+            self._server_socket.listen(5)  # 允许多个客户端排队
             self._is_running = True
             self._log(f"MCPForwarder started on {self.host}:{self.port}")
         except OSError as e:
@@ -110,7 +118,7 @@ class MCPForwarder:
         
         处理流程：
         1. 接受新连接
-        2. 接收数据
+        2. 接收数据（所有客户端）
         3. 处理请求
         4. 发送响应
         
@@ -124,10 +132,10 @@ class MCPForwarder:
         
         try:
             # 1. 处理新连接
-            self._accept_connection()
+            self._accept_connections()
             
-            # 2. 接收数据
-            self._receive_data()
+            # 2. 接收数据（所有客户端）
+            self._receive_data_all()
             
             # 3. 处理请求队列中的请求
             self._process_requests()
@@ -138,118 +146,99 @@ class MCPForwarder:
         except Exception as e:
             self._log(f"MCPForwarder tick error: {e}")
     
-    def _accept_connection(self):
+    def _accept_connections(self):
         """
         接受新连接（非阻塞）
-        只允许一个客户端连接，已有连接时拒绝新连接（避免乒乓踢人风暴）
+        支持多客户端同时连接
         """
         if self._server_socket is None:
             return
         
-        try:
-            client, addr = self._server_socket.accept()
-            
-            # 如果已有连接，拒绝新连接（避免两个客户端互相踢导致连接风暴）
-            if self._client_socket is not None:
-                self._log(f"MCPForwarder: Rejecting new client from {addr}, existing client connected")
+        while True:
+            try:
+                client, addr = self._server_socket.accept()
+                
+                # 设置新连接为非阻塞
+                client.setblocking(False)
+                # 启用 TCP keepalive
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                
+                self._clients[client] = b""  # 初始化该客户端的 recv_buffer
+                self._log(f"MCPForwarder: Client connected from {addr} (total: {len(self._clients)})")
+                
+            except BlockingIOError:
+                break  # 没有更多新连接
+            except Exception as e:
+                self._log(f"MCPForwarder accept error: {e}")
+                break
+    
+    def _receive_data_all(self):
+        """接收所有客户端的数据"""
+        # 遍历副本，避免在迭代中修改字典
+        disconnected = []
+        for client in list(self._clients.keys()):
+            try:
+                data = client.recv(65536)
+                if data:
+                    self._clients[client] += data
+                    self._parse_messages(client)
+                elif data == b"":
+                    # 连接正常关闭
+                    addr = client.getpeername()
+                    self._log(f"MCPForwarder: Client disconnected from {addr} (normal close)")
+                    disconnected.append(client)
+            except BlockingIOError:
+                pass  # 没有数据可读，正常
+            except (ConnectionResetError, ConnectionAbortedError):
+                addr = "unknown"
                 try:
-                    # 发送拒绝消息给新客户端
-                    reject_msg = json.dumps({
-                        "type": "error",
-                        "id": "system",
-                        "error": "Another client is already connected. Connection rejected."
-                    }).encode('utf-8')
-                    length_prefix = len(reject_msg).to_bytes(4, 'big')
-                    client.sendall(length_prefix + reject_msg)
+                    addr = client.getpeername()
                 except Exception:
                     pass
-                finally:
-                    try:
-                        client.close()
-                    except Exception:
-                        pass
-                return
-            
-            # 设置新连接为非阻塞
-            client.setblocking(False)
-            # 启用 TCP keepalive（可选，帮助检测断连）
-            client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            
-            self._client_socket = client
-            self._recv_buffer = b""
-            self._log(f"MCPForwarder: Client connected from {addr}")
-            
-        except BlockingIOError:
-            pass  # 没有新连接，正常情况
-        except Exception as e:
-            self._log(f"MCPForwarder accept error: {e}")
-    
-    def _receive_data(self):
-        """
-        接收数据（非阻塞）
-        检测连接断开（外部进程可通过此机制感知编辑器状态）
-        """
-        if self._client_socket is None:
-            return
+                self._log(f"MCPForwarder: Connection lost from {addr}")
+                disconnected.append(client)
+            except OSError as e:
+                self._log(f"MCPForwarder receive OS error: {e}")
+                disconnected.append(client)
+            except Exception as e:
+                self._log(f"MCPForwarder receive error: {e}")
+                disconnected.append(client)
         
-        try:
-            data = self._client_socket.recv(65536)
-            if data:
-                self._recv_buffer += data
-                self._parse_messages()
-            elif data == b"":
-                # 连接正常关闭（对端主动断开）
-                self._log("MCPForwarder: Client disconnected (normal close)")
-                self._close_client()
-        except BlockingIOError:
-            pass  # 没有数据可读，正常情况
-        except ConnectionResetError:
-            # 连接被重置（对端异常断开）
-            self._log("MCPForwarder: Connection reset by client")
-            self._close_client()
-        except ConnectionAbortedError:
-            # 连接被中止
-            self._log("MCPForwarder: Connection aborted")
-            self._close_client()
-        except OSError as e:
-            self._log(f"MCPForwarder receive OS error: {e}")
-            self._close_client()
-        except Exception as e:
-            self._log(f"MCPForwarder receive error: {e}")
-            self._close_client()
+        # 清理断开的客户端
+        for client in disconnected:
+            self._close_client(client)
     
-    def _parse_messages(self):
+    def _parse_messages(self, client: socket.socket):
         """
-        解析消息
+        解析指定客户端的消息
         协议：4字节大端序长度前缀 + JSON消息体
         """
-        while len(self._recv_buffer) >= 4:
-            # 读取消息长度（4字节大端序）
-            msg_len = int.from_bytes(self._recv_buffer[:4], 'big')
-            
-            # 检查消息是否完整
-            if len(self._recv_buffer) < 4 + msg_len:
-                break  # 消息不完整，等待更多数据
-            
-            # 提取消息体
-            msg_data = self._recv_buffer[4:4 + msg_len]
-            self._recv_buffer = self._recv_buffer[4 + msg_len:]
+        buf = self._clients[client]
+        while len(buf) >= 4:
+            msg_len = int.from_bytes(buf[:4], 'big')
+            if len(buf) < 4 + msg_len:
+                break  # 消息不完整
+            msg_data = buf[4:4 + msg_len]
+            buf = buf[4 + msg_len:]
             
             try:
                 message = json.loads(msg_data.decode('utf-8'))
-                self._pending_requests.append(message)
+                # 请求带上客户端标识
+                self._pending_requests.append((client, message))
             except json.JSONDecodeError as e:
                 self._log(f"MCPForwarder JSON decode error: {e}")
             except UnicodeDecodeError as e:
                 self._log(f"MCPForwarder Unicode decode error: {e}")
+        
+        self._clients[client] = buf
     
     def _process_requests(self):
         """处理待处理的请求队列"""
         while self._pending_requests:
-            request = self._pending_requests.pop(0)
+            client, request = self._pending_requests.pop(0)
             response = self._handle_request(request)
             if response is not None:
-                self._pending_responses.append(response)
+                self._pending_responses.append((client, response))
     
     def _handle_request(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
@@ -397,52 +386,55 @@ class MCPForwarder:
         }
     
     def _send_responses(self):
-        """发送待发送的响应"""
-        if self._client_socket is None:
-            self._pending_responses.clear()
-            return
-        
-        while self._pending_responses:
-            response = self._pending_responses.pop(0)
+        """发送待发送的响应（给各客户端）"""
+        remaining = []
+        for client, response in self._pending_responses:
+            # 检查客户端是否还连接
+            if client not in self._clients:
+                continue
+            
             try:
                 data = json.dumps(response, ensure_ascii=False).encode('utf-8')
-                # 添加长度前缀
                 length_prefix = len(data).to_bytes(4, 'big')
-                self._client_socket.sendall(length_prefix + data)
+                client.sendall(length_prefix + data)
             except BlockingIOError:
-                # 发送缓冲区满，放回队列
-                self._pending_responses.insert(0, response)
-                break
-            except BrokenPipeError:
-                self._log("MCPForwarder: Broken pipe during send")
-                self._close_client()
-                break
-            except ConnectionResetError:
-                self._log("MCPForwarder: Connection reset during send")
-                self._close_client()
-                break
+                # 发送缓冲区满，保留到下一帧
+                remaining.append((client, response))
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                self._log("MCPForwarder: Connection lost during send")
+                self._close_client(client)
+            except OSError as e:
+                self._log(f"MCPForwarder send OS error: {e}")
+                self._close_client(client)
             except Exception as e:
                 self._log(f"MCPForwarder send error: {e}")
-                self._close_client()
-                break
+                self._close_client(client)
+        
+        self._pending_responses = remaining
     
-    def _close_client(self):
-        """关闭客户端连接"""
-        if self._client_socket:
-            try:
-                self._client_socket.close()
-            except Exception:
-                pass
-            self._client_socket = None
-        self._recv_buffer = b""
-        self._pending_requests.clear()
-        self._pending_responses.clear()
-        self._state = ForwarderState.IDLE
+    def _close_client(self, client: socket.socket):
+        """关闭指定客户端连接"""
+        if client in self._clients:
+            del self._clients[client]
+        try:
+            client.close()
+        except Exception:
+            pass
+        # 清理该客户端相关的待处理请求和响应
+        self._pending_requests = [(c, r) for c, r in self._pending_requests if c != client]
+        self._pending_responses = [(c, r) for c, r in self._pending_responses if c != client]
+        if not self._clients:
+            self._state = ForwarderState.IDLE
     
     def stop(self):
         """停止转发服务器"""
         self._is_running = False
-        self._close_client()
+        # 关闭所有客户端
+        for client in list(self._clients.keys()):
+            self._close_client(client)
+        self._clients.clear()
+        self._pending_requests.clear()
+        self._pending_responses.clear()
         if self._server_socket:
             try:
                 self._server_socket.close()
@@ -463,7 +455,12 @@ class MCPForwarder:
     @property
     def is_connected(self) -> bool:
         """是否有客户端连接"""
-        return self._client_socket is not None
+        return len(self._clients) > 0
+    
+    @property
+    def client_count(self) -> int:
+        """当前连接的客户端数量"""
+        return len(self._clients)
     
     @property
     def state(self) -> ForwarderState:

@@ -111,6 +111,7 @@ class ConnectionConfig:
     recv_buffer_size: int = 65536        # 接收缓冲区大小
 
 
+
 class EditorConnection:
     """
     与UE编辑器的连接管理
@@ -158,7 +159,7 @@ class EditorConnection:
         self._recv_buffer = b""
         self._lock = asyncio.Lock()
         self._receive_task: Optional[asyncio.Task] = None
-        
+
         # 状态变化回调
         self.on_state_change: Optional[Callable[[EditorState, EditorState], None]] = None
         self.on_disconnected: Optional[Callable[[], None]] = None
@@ -331,17 +332,6 @@ class EditorConnection:
         if self.debug:
             _log(f"[DEBUG][EditorConnection] Received message: id={request_id}, type={message.get('type')}")
             _log(f"[DEBUG][EditorConnection] Message content: {json.dumps(message, indent=2, ensure_ascii=False)[:500]}")
-        
-        # 检测服务端拒绝消息（已有其他客户端连接）
-        if message.get("type") == "error" and "rejected" in message.get("error", "").lower():
-            _log(f"[EditorConnection] Connection rejected by editor: {message.get('error')}")
-            _log("[EditorConnection] Another MCP client is already connected. Exiting to avoid connection storm.")
-            self._rejected = True
-            self.disconnect()
-            # stdio 模式下被拒绝应直接退出，MCP 客户端会在需要时重新拉起
-            # 重试只会造成连接风暴
-            os._exit(1)
-            return
         
         if request_id and request_id in self._pending_requests:
             future = self._pending_requests.pop(request_id)
