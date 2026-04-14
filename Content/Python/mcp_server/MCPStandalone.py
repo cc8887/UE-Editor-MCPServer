@@ -26,9 +26,34 @@ import sys
 import tempfile
 import os
 import subprocess
+import msvcrt
 from typing import Optional, Dict, Any, List, Callable
 from enum import Enum
 from dataclasses import dataclass
+
+
+def _acquire_single_instance_lock() -> Optional[Any]:
+    """
+    Windows 单实例锁：通过文件锁防止多个 MCPStandalone 进程同时运行。
+    返回锁文件对象（需保持引用），如果已有实例则返回 None。
+    """
+    lock_path = os.path.join(tempfile.gettempdir(), "MCPStandalone.lock")
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
+        # 尝试获取排他锁（非阻塞）
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        # 写入当前 PID
+        os.ftruncate(fd, 0)
+        os.write(fd, str(os.getpid()).encode())
+        os.fsync(fd)
+        return fd
+    except (OSError, IOError):
+        # 锁定失败 = 已有另一个实例在运行
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        return None
 
 
 def _log(msg: str):
@@ -84,7 +109,6 @@ class ConnectionConfig:
     connect_timeout: float = 5.0         # 连接超时（秒）
     request_timeout: float = 86400.0     # 请求超时（秒），默认24小时
     recv_buffer_size: int = 65536        # 接收缓冲区大小
-    rejected_backoff: float = 30.0       # 被拒绝后的退避时间（秒），避免刷日志
 
 
 class EditorConnection:
@@ -134,7 +158,6 @@ class EditorConnection:
         self._recv_buffer = b""
         self._lock = asyncio.Lock()
         self._receive_task: Optional[asyncio.Task] = None
-        self._rejected = False  # 是否被服务端拒绝（已有其他客户端连接）
         
         # 状态变化回调
         self.on_state_change: Optional[Callable[[EditorState, EditorState], None]] = None
@@ -181,8 +204,7 @@ class EditorConnection:
         """
         if self._socket:
             return True
-        
-        self._rejected = False  # 重置拒绝标记
+
         self._set_state(EditorState.CONNECTING)
         
         try:
@@ -313,8 +335,12 @@ class EditorConnection:
         # 检测服务端拒绝消息（已有其他客户端连接）
         if message.get("type") == "error" and "rejected" in message.get("error", "").lower():
             _log(f"[EditorConnection] Connection rejected by editor: {message.get('error')}")
+            _log("[EditorConnection] Another MCP client is already connected. Exiting to avoid connection storm.")
             self._rejected = True
             self.disconnect()
+            # stdio 模式下被拒绝应直接退出，MCP 客户端会在需要时重新拉起
+            # 重试只会造成连接风暴
+            os._exit(1)
             return
         
         if request_id and request_id in self._pending_requests:
@@ -839,27 +865,12 @@ class MCPStandaloneServer:
                 pass
             
             if not self.editor_connection.is_connected:
-                # 被拒绝时使用更长的退避时间，避免刷日志
-                if self.editor_connection._rejected:
-                    backoff = self.editor_connection.config.rejected_backoff
-                    _log(f"[MCPServer] Connection rejected (another client connected), backing off {backoff}s...")
-                    await asyncio.sleep(backoff)
-                    self.editor_connection._rejected = False
-                    continue
-                
                 _log("[MCPServer] Attempting to connect to editor...")
                 connected = await self.editor_connection.connect()
                 
                 if not connected:
-                    # 连接被拒绝时检查是否是 rejection
-                    if self.editor_connection._rejected:
-                        backoff = self.editor_connection.config.rejected_backoff
-                        _log(f"[MCPServer] Connection rejected, backing off {backoff}s...")
-                        await asyncio.sleep(backoff)
-                        self.editor_connection._rejected = False
-                    else:
-                        _log(f"[MCPServer] Connection failed, retrying in {self.editor_connection.config.reconnect_interval}s...")
-                        await asyncio.sleep(self.editor_connection.config.reconnect_interval)
+                    _log(f"[MCPServer] Connection failed, retrying in {self.editor_connection.config.reconnect_interval}s...")
+                    await asyncio.sleep(self.editor_connection.config.reconnect_interval)
     
     async def _handle_tool_call(self, name: str, arguments: dict) -> ExecutionResult:
         """
@@ -1119,6 +1130,12 @@ class MCPStandaloneServer:
 def main():
     """主函数 - 命令行入口"""
     import argparse
+    
+    # 单实例锁：防止多个 MCPStandalone 进程同时运行
+    _lock_fd = _acquire_single_instance_lock()
+    if _lock_fd is None:
+        _log("[MCPServer] Another MCPStandalone instance is already running. Exiting.")
+        sys.exit(0)
     
     # 先加载配置获取默认值
     config = load_config()
