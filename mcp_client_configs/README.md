@@ -1,6 +1,6 @@
 # MCPServer - MCP Client 配置指南
 
-插件位置：`<YOUR_ALSV_PROJECT>\Plugins\MCPServer\`
+插件位置：`<YOUR_PROJECT>\Plugins\UE-Editor-MCPServer\`
 端口：MCP_PORT=8099（对外）/ EDITOR_PORT=8100（UE 内部转发）
 
 ---
@@ -25,10 +25,10 @@ MCP 客户端直接用 `uv run python main.py` 启动服务进程。
 
 先在终端手动运行：
 ```cmd
-cd <YOUR_ALSV_PROJECT>\Plugins\MCPServer
+cd <YOUR_PROJECT>\Plugins\UE-Editor-MCPServer
 uv run python main.py
 ```
-然后客户端直连 `http://127.0.0.1:8099/sse`。
+然后客户端直连 `http://127.0.0.1:8099/SSE`。
 
 ---
 
@@ -46,7 +46,7 @@ uv run python main.py
       "args": [
         "run",
         "--directory",
-        "<YOUR_ALSV_PROJECT>\\Plugins\\MCPServer",
+        "<YOUR_PROJECT>\\Plugins\\UE-Editor-MCPServer",
         "python",
         "main.py"
       ],
@@ -75,7 +75,7 @@ uv run python main.py
       "args": [
         "run",
         "--directory",
-        "<YOUR_ALSV_PROJECT>\\Plugins\\MCPServer",
+        "<YOUR_PROJECT>\\Plugins\\UE-Editor-MCPServer",
         "python",
         "main.py"
       ],
@@ -103,7 +103,7 @@ uv run python main.py
 适用于任何支持 SSE MCP transport 的客户端：
 
 ```
-URL: http://127.0.0.1:8099/sse
+URL: http://127.0.0.1:8099/SSE
 Transport: SSE
 ```
 
@@ -112,7 +112,7 @@ Transport: SSE
 ## 调试
 
 ```cmd
-cd <YOUR_ALSV_PROJECT>\Plugins\MCPServer
+cd <YOUR_PROJECT>\Plugins\UE-Editor-MCPServer
 uv run python main.py --debug
 ```
 
