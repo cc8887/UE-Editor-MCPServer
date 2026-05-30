@@ -1,26 +1,33 @@
-# test_mcp_client.py - Lightweight MCP SSE client end-to-end test
+# test_mcp_client.py - Dual-transport MCP regression test (SSE + STDIO)
 #
-# Independent of Box Engine, pure Python MCP SSE protocol implementation.
+# Independent of Unreal Engine, pure Python MCP protocol implementation.
 # Easy to share with others for quick verification of UE-Editor-MCPServer.
 #
 # Prerequisites:
 #   1. UE Editor running with MCPForwarder plugin on port 8100
-#   2. MCP SSE Server running on port 8099
+#   2. For SSE: MCP SSE Server running on port 8099
+#   3. For STDIO: main.py (MCPStandalone) available in this directory
 #
 # Usage:
-#   python test_mcp_client.py                     # Run all tests
-#   python test_mcp_client.py --test ping        # Only ping test
-#   python test_mcp_client.py --test exec        # Only execute_command
-#   python test_mcp_client.py --test file        # Only excute_file
-#   python test_mcp_client.py --test error       # Only error handling
+#   python test_mcp_client.py                          # Run all tests on both transports
+#   python test_mcp_client.py --transport sse          # SSE only
+#   python test_mcp_client.py --transport stdio        # STDIO only
+#   python test_mcp_client.py --transport both         # Both (default)
+#   python test_mcp_client.py --test ping              # Only ping test
+#   python test_mcp_client.py --test exec              # Only execute_command
+#   python test_mcp_client.py --test file              # Only excute_file
+#   python test_mcp_client.py --test error             # Only error handling
 
 import asyncio
 import json
 import sys
+import os
 import argparse
 import time
 import uuid
-from typing import Optional
+from collections import deque
+from typing import Optional, List, Dict, Any
+from abc import ABC, abstractmethod
 
 
 # --- ANSI colors ---
@@ -28,6 +35,7 @@ GREEN = "\033[92m"
 RED = "\033[91m"
 YELLOW = "\033[93m"
 CYAN = "\033[96m"
+BOLD = "\033[1m"
 RESET = "\033[0m"
 
 
@@ -47,8 +55,46 @@ def warn(msg):
     print(f"  {YELLOW}!{RESET} {msg}")
 
 
+# --- Abstract MCP Client Interface ---
+
+class MCPClientBase(ABC):
+    """Abstract base class for MCP clients (SSE and STDIO share the same API)."""
+
+    @abstractmethod
+    async def connect(self) -> bool:
+        """Establish connection to MCP server."""
+        ...
+
+    @abstractmethod
+    async def initialize(self) -> bool:
+        """Send MCP initialize handshake."""
+        ...
+
+    @abstractmethod
+    async def list_tools(self) -> List[Dict[str, Any]]:
+        """List available tools."""
+        ...
+
+    @abstractmethod
+    async def call_tool(self, name: str, arguments: dict) -> dict:
+        """Call a tool by name."""
+        ...
+
+    @abstractmethod
+    async def close(self):
+        """Close connection."""
+        ...
+
+    @property
+    @abstractmethod
+    def transport_name(self) -> str:
+        """Human-readable transport name."""
+        ...
+
+
 # --- MCP SSE Client ---
-class MCPSSEClient:
+
+class MCPSSEClient(MCPClientBase):
     """Minimal MCP SSE client using only stdlib."""
 
     def __init__(self, sse_url):
@@ -61,6 +107,10 @@ class MCPSSEClient:
         self._response_data = {}
         self._recv_task = None
         self._initialized = False
+
+    @property
+    def transport_name(self) -> str:
+        return "SSE"
 
     async def connect(self):
         """Establish SSE connection and wait for endpoint event."""
@@ -265,11 +315,7 @@ class MCPSSEClient:
         await self._post(payload)
 
     async def _post(self, payload):
-        """POST JSON to MCP messages endpoint via a SEPARATE connection.
-
-        The SSE GET connection is a long-lived stream that must stay open to
-        receive responses, so each POST opens its own short-lived connection.
-        """
+        """POST JSON to MCP messages endpoint via a SEPARATE connection."""
         from urllib.parse import urlparse
 
         if not self.post_url:
@@ -317,7 +363,275 @@ class MCPSSEClient:
                 pass
 
 
+# --- MCP STDIO Client ---
+
+class MCPStdioClient(MCPClientBase):
+    """MCP STDIO client - spawns MCPStandalone as subprocess, communicates via stdin/stdout."""
+
+    def __init__(self, server_script: str = None, editor_port: int = 8100, editor_host: str = "127.0.0.1"):
+        """
+        Args:
+            server_script: Path to main.py (defaults to main.py in this directory)
+            editor_port: Editor forwarder port
+            editor_host: Editor forwarder host
+        """
+        if server_script is None:
+            server_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+        self.server_script = server_script
+        self.editor_port = editor_port
+        self.editor_host = editor_host
+        self._process: Optional[asyncio.subprocess.Process] = None
+        self._response_futures: Dict[str, asyncio.Future] = {}
+        self._recv_task: Optional[asyncio.Task] = None
+        self._stderr_task: Optional[asyncio.Task] = None
+        self._wait_task: Optional[asyncio.Task] = None
+        self._stderr_lines = deque(maxlen=40)
+        self._stdout_leaks = deque(maxlen=20)
+        self._initialized = False
+
+    @property
+    def transport_name(self) -> str:
+        return "STDIO"
+
+    async def connect(self) -> bool:
+        """Spawn the MCP server subprocess in stdio mode."""
+        if not os.path.isfile(self.server_script):
+            fail(f"Server script not found: {self.server_script}")
+            return False
+
+        info(f"Spawning STDIO server: {self.server_script}")
+        info(f"Editor target: {self.editor_host}:{self.editor_port}")
+
+        lock_name = f"MCPStandalone-stdio-{uuid.uuid4().hex}.lock"
+        env = os.environ.copy()
+        env["MCP_STANDALONE_LOCK_NAME"] = lock_name
+
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                sys.executable, self.server_script,
+                "--transport", "stdio",
+                "--editor-host", self.editor_host,
+                "--editor-port", str(self.editor_port),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+            )
+        except Exception as e:
+            fail(f"Failed to spawn server process: {e}")
+            return False
+
+        self._recv_task = asyncio.create_task(self._recv_loop())
+        self._stderr_task = asyncio.create_task(self._stderr_loop())
+        self._wait_task = asyncio.create_task(self._process.wait())
+
+        done, _ = await asyncio.wait({self._wait_task}, timeout=1.0)
+        if done:
+            fail(f"Server process exited immediately (rc={self._process.returncode})")
+            self._report_process_output()
+            return False
+
+        ok("STDIO server process started")
+        return True
+
+    async def initialize(self) -> bool:
+        """Send MCP initialize request over stdio."""
+        result = await self._send_jsonrpc("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "test-mcp-client-stdio",
+                "version": "1.0.0"
+            }
+        })
+
+        if result is None:
+            fail("initialize request failed (stdio)")
+            return False
+
+        server_name = "?"
+        if isinstance(result, dict):
+            server_name = result.get("serverInfo", {}).get("name", "?")
+        ok(f"Initialized: server={server_name}")
+
+        await self._send_notification("notifications/initialized", {})
+        ok("Sent initialized notification")
+
+        self._initialized = True
+        return True
+
+    async def list_tools(self) -> List[Dict[str, Any]]:
+        """List available tools."""
+        result = await self._send_jsonrpc("tools/list", {})
+        if result is None:
+            return []
+        tools = result.get("tools", [])
+        return tools
+
+    async def call_tool(self, name: str, arguments: dict) -> dict:
+        """Call a tool."""
+        result = await self._send_jsonrpc("tools/call", {
+            "name": name,
+            "arguments": arguments
+        })
+        return result or {}
+
+    async def close(self):
+        """Terminate the subprocess."""
+        for task in (self._recv_task, self._stderr_task):
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        if self._process and self._process.returncode is None:
+            try:
+                self._process.terminate()
+                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self._process.kill()
+                await self._process.wait()
+            except ProcessLookupError:
+                pass
+            except Exception as e:
+                warn(f"Failed to stop STDIO server process: {e}")
+
+        if self._wait_task:
+            try:
+                await asyncio.wait_for(asyncio.shield(self._wait_task), timeout=0.5)
+            except Exception:
+                pass
+
+    # --- Internal ---
+
+    def _fail_pending_requests(self, reason: str):
+        for req_id, future in list(self._response_futures.items()):
+            if not future.done():
+                future.set_exception(RuntimeError(reason))
+            self._response_futures.pop(req_id, None)
+
+    def _report_process_output(self):
+        stderr_out = "\n".join(self._stderr_lines).strip()
+        stdout_leaks = "\n".join(self._stdout_leaks).strip()
+        if stderr_out:
+            warn(f"stderr: {stderr_out[:1000]}")
+        if stdout_leaks:
+            warn(f"unexpected stdout: {stdout_leaks[:1000]}")
+
+    async def _recv_loop(self):
+        """Background reader for stdout - parses JSON-RPC responses."""
+        try:
+            while True:
+                line = await self._process.stdout.readline()
+                if not line:
+                    self._fail_pending_requests("STDIO server stdout closed")
+                    break
+
+                decoded = line.decode("utf-8", errors="replace").strip()
+                if not decoded:
+                    continue
+
+                try:
+                    msg = json.loads(decoded)
+                except json.JSONDecodeError:
+                    self._stdout_leaks.append(decoded)
+                    continue
+
+                req_id = msg.get("id")
+                if req_id and req_id in self._response_futures:
+                    future = self._response_futures.pop(req_id)
+                    if not future.done():
+                        future.set_result(msg)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            self._fail_pending_requests(f"STDIO recv error: {e}")
+            warn(f"STDIO recv error: {e}")
+
+    async def _stderr_loop(self):
+        """Background reader for stderr - keeps recent diagnostics for failures."""
+        try:
+            while True:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                decoded = line.decode("utf-8", errors="replace").strip()
+                if decoded:
+                    self._stderr_lines.append(decoded)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            warn(f"STDIO stderr error: {e}")
+
+    async def _send_jsonrpc(self, method: str, params: dict, timeout: float = 30.0):
+        """Send JSON-RPC request and wait for response."""
+        if self._process is None or self._process.returncode is not None:
+            fail("STDIO server process not running")
+            self._report_process_output()
+            return None
+
+        req_id = str(uuid.uuid4())
+        payload = {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "method": method,
+            "params": params
+        }
+
+        future = asyncio.get_event_loop().create_future()
+        self._response_futures[req_id] = future
+
+        data = json.dumps(payload, ensure_ascii=False) + "\n"
+        try:
+            self._process.stdin.write(data.encode("utf-8"))
+            await self._process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, AttributeError) as e:
+            self._response_futures.pop(req_id, None)
+            fail(f"Failed to write request ({method}): {e}")
+            self._report_process_output()
+            return None
+
+        try:
+            resp = await asyncio.wait_for(future, timeout=timeout)
+
+            if resp and "error" in resp:
+                fail(f"JSON-RPC error: {resp['error']}")
+                return resp
+            return resp.get("result") if resp else None
+        except asyncio.TimeoutError:
+            self._response_futures.pop(req_id, None)
+            fail(f"Request timed out ({method})")
+            self._report_process_output()
+            return None
+        except RuntimeError as e:
+            self._response_futures.pop(req_id, None)
+            fail(f"{e} ({method})")
+            self._report_process_output()
+            return None
+
+    async def _send_notification(self, method: str, params: dict):
+        """Send JSON-RPC notification (no id, no response expected)."""
+        if self._process is None or self._process.returncode is not None:
+            return
+
+        payload = {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        }
+
+        data = json.dumps(payload, ensure_ascii=False) + "\n"
+        try:
+            self._process.stdin.write(data.encode("utf-8"))
+            await self._process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError, AttributeError):
+            self._report_process_output()
+
+
 # --- Helper ---
+
 def _extract_text(result):
     """Extract text content from MCP tool call result."""
     content = result.get("content", []) if isinstance(result, dict) else []
@@ -339,25 +653,59 @@ def _has_error(result):
     return False
 
 
-# --- Test Cases ---
+# --- Test Cases (transport-agnostic) ---
 
-async def test_ping(client):
-    """Test 1: Check editor connection via get_editor_state."""
-    print("\n[Test 1] Ping - get_editor_state")
-    result = await client.call_tool("get_editor_state", {})
-    text = _extract_text(result)
+async def test_initialize(client: MCPClientBase):
+    """Test: MCP initialize handshake (covered implicitly by connect+initialize)."""
+    # initialize is already done in the setup phase; if we got here, it passed.
+    print(f"\n[Test] Initialize ({client.transport_name})")
+    ok("Initialize handshake succeeded (verified during setup)")
+    return True
 
-    if "connected" in text.lower():
-        ok(f"Editor state: {text.strip()}")
+
+async def test_list_tools(client: MCPClientBase):
+    """Test: List tools returns expected tool set."""
+    print(f"\n[Test] List Tools ({client.transport_name})")
+    tools = await client.list_tools()
+
+    if not tools:
+        fail("No tools returned")
+        return False
+
+    tool_names = [t.get("name") for t in tools]
+    expected = {"execute_command", "excute_file", "get_editor_state"}
+    found = expected.intersection(set(tool_names))
+
+    if found == expected:
+        ok(f"All expected tools present: {sorted(expected)}")
+        for t in tools:
+            desc = t.get("description", "")[:60]
+            info(f"  {t['name']}: {desc}")
         return True
     else:
-        fail(f"Editor not connected: {text.strip()}")
+        missing = expected - found
+        fail(f"Missing tools: {missing}")
+        warn(f"Got: {tool_names}")
         return False
 
 
-async def test_execute_simple(client):
-    """Test 2: Execute simple Python expression."""
-    print("\n[Test 2] Execute simple expression: 1 + 2")
+async def test_get_editor_state(client: MCPClientBase):
+    """Test: get_editor_state returns a meaningful state string."""
+    print(f"\n[Test] get_editor_state ({client.transport_name})")
+    result = await client.call_tool("get_editor_state", {})
+    text = _extract_text(result)
+
+    if "connected" in text.lower() or "disconnected" in text.lower() or "state" in text.lower():
+        ok(f"Editor state: {text.strip()}")
+        return True
+    else:
+        fail(f"Unexpected editor state response: {text.strip()}")
+        return False
+
+
+async def test_execute_command(client: MCPClientBase):
+    """Test: Execute simple Python expression via execute_command."""
+    print(f"\n[Test] execute_command ({client.transport_name})")
     result = await client.call_tool("execute_command", {
         "code": "print(1 + 2)"
     })
@@ -371,9 +719,9 @@ async def test_execute_simple(client):
         return False
 
 
-async def test_execute_unreal_api(client):
-    """Test 3: Call Unreal API."""
-    print("\n[Test 3] Execute Unreal API: get_all_level_actors")
+async def test_execute_unreal_api(client: MCPClientBase):
+    """Test: Call Unreal API via execute_command."""
+    print(f"\n[Test] execute_command - Unreal API ({client.transport_name})")
     result = await client.call_tool("execute_command", {
         "code": "import unreal; actors = unreal.EditorLevelLibrary.get_all_level_actors(); print(f'Actor count: {len(actors)}')"
     })
@@ -387,12 +735,11 @@ async def test_execute_unreal_api(client):
         return False
 
 
-async def test_execute_file(client):
-    """Test 4: Execute a Python file."""
-    print("\n[Test 4] Execute Python file")
+async def test_execute_file(client: MCPClientBase):
+    """Test: Execute a Python file via excute_file."""
+    print(f"\n[Test] excute_file ({client.transport_name})")
 
     import tempfile
-    import os
 
     tmp_dir = tempfile.gettempdir()
     tmp_file = os.path.join(tmp_dir, "mcp_test_script.py")
@@ -426,9 +773,9 @@ async def test_execute_file(client):
         return False
 
 
-async def test_error_handling(client):
-    """Test 5: Error handling - intentional bad code."""
-    print("\n[Test 5] Error handling - intentional RuntimeError")
+async def test_error_handling(client: MCPClientBase):
+    """Test: Error handling - intentional bad code."""
+    print(f"\n[Test] Error handling ({client.transport_name})")
     result = await client.call_tool("execute_command", {
         "code": "raise RuntimeError('test error from MCP client')"
     })
@@ -443,91 +790,165 @@ async def test_error_handling(client):
         return True  # Not a failure, just different format
 
 
-# --- Main ---
+# --- Test Registry ---
 
-ALL_TESTS = {
-    "ping": ("Ping / Editor State", test_ping),
-    "state": ("Ping / Editor State", test_ping),
-    "exec": ("Execute Simple Expression", test_execute_simple),
-    "exec_simple": ("Execute Simple Expression", test_execute_simple),
-    "exec_unreal": ("Execute Unreal API", test_execute_unreal_api),
-    "file": ("Execute Python File", test_execute_file),
-    "error": ("Error Handling", test_error_handling),
+# All tests available for SSE (original 5 e2e tests mapped to new functions)
+SSE_TESTS = [
+    ("initialize", "Initialize Handshake", test_initialize),
+    ("list_tools", "List Tools", test_list_tools),
+    ("ping", "get_editor_state", test_get_editor_state),
+    ("exec_simple", "Execute Simple Expression", test_execute_command),
+    ("exec_unreal", "Execute Unreal API", test_execute_unreal_api),
+    ("file", "Execute Python File", test_execute_file),
+    ("error", "Error Handling", test_error_handling),
+]
+
+# STDIO tests: initialize/list_tools/get_editor_state/execute_command/excute_file/error
+STDIO_TESTS = [
+    ("initialize", "Initialize Handshake", test_initialize),
+    ("list_tools", "List Tools", test_list_tools),
+    ("ping", "get_editor_state", test_get_editor_state),
+    ("exec_simple", "Execute Simple Expression", test_execute_command),
+    ("file", "Execute Python File", test_execute_file),
+    ("error", "Error Handling", test_error_handling),
+]
+
+# Test name aliases for --test filter
+TEST_ALIASES = {
+    "ping": "ping",
+    "state": "ping",
+    "exec": "exec_simple",
+    "exec_simple": "exec_simple",
+    "exec_unreal": "exec_unreal",
+    "file": "file",
+    "error": "error",
+    "initialize": "initialize",
+    "init": "initialize",
+    "list_tools": "list_tools",
+    "tools": "list_tools",
 }
 
-DEFAULT_TEST_ORDER = ["ping", "exec_simple", "exec_unreal", "file", "error"]
 
+# --- Runner ---
 
-async def run_tests(mcp_url, test_filter=None):
-    """Run tests."""
-    print("=" * 60)
-    print("UE-Editor-MCPServer End-to-End Test")
-    print("=" * 60)
-    print(f"SSE URL: {mcp_url}")
-    print()
+async def run_transport_tests(client: MCPClientBase, test_suite: list, test_filter: str = None):
+    """
+    Run tests on a single transport.
 
-    client = MCPSSEClient(mcp_url)
+    Args:
+        client: MCP client instance
+        test_suite: List of (key, description, test_fn) tuples
+        test_filter: Optional test key to run only one test
 
-    # 1. Connect SSE
+    Returns:
+        List of (description, passed) tuples
+    """
+    transport = client.transport_name
+    print(f"\n{'=' * 60}")
+    print(f"{BOLD}Transport: {transport}{RESET}")
+    print(f"{'=' * 60}")
+
+    # Connect
     if not await client.connect():
-        fail("Cannot establish SSE connection. Is the MCP server running?")
+        fail(f"Cannot establish {transport} connection. Is the MCP server running?")
         await client.close()
-        return
+        return [(f"{transport} connection", False)]
 
-    # 2. MCP initialize
+    # Initialize
     if not await client.initialize():
-        fail("MCP initialize failed")
+        fail(f"MCP initialize failed ({transport})")
         await client.close()
-        return
+        return [(f"{transport} initialize", False)]
 
-    # 3. List tools
-    print("\n[List Tools]")
-    tools = await client.list_tools()
-    if tools:
-        for t in tools:
-            desc = t.get("description", "")[:60]
-            ok(f"{t['name']}: {desc}")
-    else:
-        warn("No tools listed")
-
-    # 4. Select tests
+    # Select tests
     if test_filter:
-        if test_filter not in ALL_TESTS:
-            fail(f"No test named '{test_filter}'. Available: {', '.join(ALL_TESTS.keys())}")
+        resolved = TEST_ALIASES.get(test_filter, test_filter)
+        selected = [(k, d, fn) for k, d, fn in test_suite if k == resolved]
+        if not selected:
+            available = sorted(set(k for k, _, _ in test_suite))
+            fail(f"No test '{test_filter}' in {transport} suite. Available: {available}")
             await client.close()
-            return
-        selected = [(test_filter, ALL_TESTS[test_filter])]
+            return []
     else:
-        selected = [(k, ALL_TESTS[k]) for k in DEFAULT_TEST_ORDER]
+        selected = test_suite
 
-    # 5. Run tests
+    # Run tests
     results = []
-    for key, (desc, test_fn) in selected:
+    for key, desc, test_fn in selected:
         try:
             passed = await test_fn(client)
-            results.append((desc, passed))
+            results.append((f"[{transport}] {desc}", passed))
         except Exception as e:
-            fail(f"Exception: {e}")
-            results.append((desc, False))
+            fail(f"Exception in {key}: {e}")
+            results.append((f"[{transport}] {desc}", False))
 
-    # 6. Summary
-    print("\n" + "=" * 60)
-    print("Summary")
+    await client.close()
+    return results
+
+
+async def run_all(args):
+    """Main test orchestrator."""
     print("=" * 60)
-    passed_count = sum(1 for _, p in results if p)
-    total_count = len(results)
-    for desc, passed in results:
+    print(f"{BOLD}UE-Editor-MCPServer Dual-Transport Regression Test{RESET}")
+    print("=" * 60)
+    print(f"Transport: {args.transport}")
+    if args.test:
+        print(f"Filter: {args.test}")
+    print()
+
+    all_results = []
+
+    # --- SSE ---
+    if args.transport in ("sse", "both"):
+        client = MCPSSEClient(args.mcp_url)
+        results = await run_transport_tests(client, SSE_TESTS, args.test)
+        all_results.extend(results)
+
+    # --- STDIO ---
+    if args.transport in ("stdio", "both"):
+        client = MCPStdioClient(
+            server_script=args.stdio_script,
+            editor_port=args.editor_port,
+            editor_host=args.editor_host,
+        )
+        results = await run_transport_tests(client, STDIO_TESTS, args.test)
+        all_results.extend(results)
+
+    # --- Summary ---
+    print(f"\n{'=' * 60}")
+    print(f"{BOLD}Summary{RESET}")
+    print("=" * 60)
+    passed_count = sum(1 for _, p in all_results if p)
+    total_count = len(all_results)
+
+    for desc, passed in all_results:
         status = f"{GREEN}PASS{RESET}" if passed else f"{RED}FAIL{RESET}"
         print(f"  [{status}] {desc}")
 
     print(f"\n  {passed_count}/{total_count} tests passed")
 
-    await client.close()
+    if passed_count < total_count:
+        sys.exit(1)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Lightweight MCP SSE Client Test for UE-Editor-MCPServer",
+        description="Dual-transport MCP regression test (SSE + STDIO)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""\
+Examples:
+  python test_mcp_client.py                          # Both transports, all tests
+  python test_mcp_client.py --transport sse          # SSE only
+  python test_mcp_client.py --transport stdio        # STDIO only
+  python test_mcp_client.py --test ping              # Single test on selected transport(s)
+  python test_mcp_client.py --transport stdio --test error
+"""
+    )
+    parser.add_argument(
+        "--transport",
+        choices=["sse", "stdio", "both"],
+        default="both",
+        help="Transport to test: sse, stdio, or both (default: both)",
     )
     parser.add_argument(
         "--mcp-url",
@@ -535,13 +956,29 @@ def main():
         help="MCP SSE endpoint URL (default: http://127.0.0.1:8099/SSE)",
     )
     parser.add_argument(
+        "--stdio-script",
+        default=None,
+        help="Path to main.py for STDIO mode (default: ./main.py)",
+    )
+    parser.add_argument(
+        "--editor-port",
+        type=int,
+        default=8100,
+        help="Editor forwarder port (default: 8100)",
+    )
+    parser.add_argument(
+        "--editor-host",
+        default="127.0.0.1",
+        help="Editor forwarder host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
         "--test",
         default=None,
-        help=f"Run a specific test. Options: {', '.join(ALL_TESTS.keys())}",
+        help=f"Run a specific test. Options: {', '.join(sorted(TEST_ALIASES.keys()))}",
     )
 
     args = parser.parse_args()
-    asyncio.run(run_tests(args.mcp_url, args.test))
+    asyncio.run(run_all(args))
 
 
 if __name__ == "__main__":

@@ -9,6 +9,11 @@ main.py - 独立MCP服务器启动入口
 import sys
 import os
 
+
+def _log(msg: str):
+    """输出到 stderr，避免污染 stdio 协议流"""
+    print(msg, file=sys.stderr)
+
 # 获取路径但不添加到sys.path，避免Content/Python中的旧版本库覆盖系统库
 script_dir = os.path.dirname(os.path.abspath(__file__))
 python_dir = os.path.join(script_dir, "Content", "Python")
@@ -16,14 +21,14 @@ python_dir = os.path.join(script_dir, "Content", "Python")
 
 def main():
     """启动独立MCP服务器"""
-    print("=" * 60)
-    print("UE Editor MCP Standalone Server")
-    print("=" * 60)
+    _log("=" * 60)
+    _log("UE Editor MCP Standalone Server")
+    _log("=" * 60)
     
     # 计算插件根目录的绝对路径
     # main.py 在 Plugins/UE-Editor-MCPServer/ 下
     plugin_root = os.path.abspath(script_dir)
-    print(f"Plugin root: {plugin_root}")
+    _log(f"Plugin root: {plugin_root}")
     
     # 将排除路径传递给环境变量，供MCPStandalone使用
     os.environ['MCP_MYPY_EXCLUDE_PATHS'] = plugin_root
@@ -44,13 +49,13 @@ def main():
         # 使用MCPStandalone的命令行入口，支持参数解析
         MCPStandalone.main()
     except ImportError as e:
-        print(f"Error: Failed to import MCPStandalone module: {e}")
-        print(f"Python path: {sys.path}")
-        print("\nPlease ensure the following dependencies are installed:")
-        print("  pip install mcp uvicorn starlette")
+        _log(f"Error: Failed to import MCPStandalone module: {e}")
+        _log(f"Python path: {sys.path}")
+        _log("\nPlease ensure the following dependencies are installed:")
+        _log("  pip install mcp uvicorn starlette")
         sys.exit(1)
     except Exception as e:
-        print(f"Error: {e}")
+        _log(f"Error: {e}")
         sys.exit(1)
 
 

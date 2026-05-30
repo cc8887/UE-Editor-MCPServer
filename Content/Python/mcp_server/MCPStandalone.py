@@ -35,9 +35,11 @@ from dataclasses import dataclass
 def _acquire_single_instance_lock() -> Optional[Any]:
     """
     Windows 单实例锁：通过文件锁防止多个 MCPStandalone 进程同时运行。
+    可通过 MCP_STANDALONE_LOCK_NAME 环境变量为不同调用方指定不同锁名。
     返回锁文件对象（需保持引用），如果已有实例则返回 None。
     """
-    lock_path = os.path.join(tempfile.gettempdir(), "MCPStandalone.lock")
+    lock_name = os.environ.get("MCP_STANDALONE_LOCK_NAME", "MCPStandalone.lock")
+    lock_path = lock_name if os.path.isabs(lock_name) else os.path.join(tempfile.gettempdir(), lock_name)
     try:
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR)
         # 尝试获取排他锁（非阻塞）

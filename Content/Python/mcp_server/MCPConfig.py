@@ -15,6 +15,7 @@ MCPConfig.py - MCP服务器配置管理
 """
 
 import os
+import sys
 from typing import Optional
 
 
@@ -94,7 +95,7 @@ def _parse_env_file(env_path: str) -> dict:
                     
                     config[key] = value
     except Exception as e:
-        print(f"[MCPConfig] Warning: Failed to parse .env file: {e}")
+        print(f"[MCPConfig] Warning: Failed to parse .env file: {e}", file=sys.stderr)
     
     return config
 
@@ -154,10 +155,10 @@ def load_config(force_reload: bool = False) -> dict:
     env_path = _find_env_file()
     
     if env_path:
-        print(f"[MCPConfig] Loading config from: {env_path}")
+        print(f"[MCPConfig] Loading config from: {env_path}", file=sys.stderr)
         env_config = _parse_env_file(env_path)
     else:
-        print("[MCPConfig] No .env file found, using defaults and environment variables")
+        print("[MCPConfig] No .env file found, using defaults and environment variables", file=sys.stderr)
     
     # 获取配置值
     mcp_port_str = _get_config_value("MCP_PORT", str(DEFAULT_MCP_PORT), env_config)
@@ -173,13 +174,13 @@ def load_config(force_reload: bool = False) -> dict:
     try:
         mcp_port = int(mcp_port_str)
     except ValueError:
-        print(f"[MCPConfig] Warning: Invalid MCP_PORT '{mcp_port_str}', using default {DEFAULT_MCP_PORT}")
+        print(f"[MCPConfig] Warning: Invalid MCP_PORT '{mcp_port_str}', using default {DEFAULT_MCP_PORT}", file=sys.stderr)
         mcp_port = DEFAULT_MCP_PORT
     
     try:
         editor_port = int(editor_port_str)
     except ValueError:
-        print(f"[MCPConfig] Warning: Invalid EDITOR_PORT '{editor_port_str}', using default {DEFAULT_EDITOR_PORT}")
+        print(f"[MCPConfig] Warning: Invalid EDITOR_PORT '{editor_port_str}', using default {DEFAULT_EDITOR_PORT}", file=sys.stderr)
         editor_port = DEFAULT_EDITOR_PORT
     
     _config_cache = {
@@ -190,10 +191,10 @@ def load_config(force_reload: bool = False) -> dict:
         "mypy_enabled": mypy_enabled,
     }
     
-    print(f"[MCPConfig] Configuration loaded:")
-    print(f"  MCP Server: {mcp_host}:{mcp_port}")
-    print(f"  Editor Forwarder: {editor_host}:{editor_port}")
-    print(f"  MyPy Enabled: {mypy_enabled}")
+    print(f"[MCPConfig] Configuration loaded:", file=sys.stderr)
+    print(f"  MCP Server: {mcp_host}:{mcp_port}", file=sys.stderr)
+    print(f"  Editor Forwarder: {editor_host}:{editor_port}", file=sys.stderr)
+    print(f"  MyPy Enabled: {mypy_enabled}", file=sys.stderr)
     
     return _config_cache
 
