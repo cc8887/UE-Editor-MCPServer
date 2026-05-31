@@ -11,6 +11,7 @@ MCPCore - MCP公共核心模块
 
 import os
 import sys
+from itertools import product
 from datetime import datetime
 from typing import List, Dict, Any, Tuple, Optional
 from dataclasses import dataclass
@@ -91,6 +92,24 @@ uvicorn = _http_modules.get("uvicorn")
 Starlette = _http_modules.get("Starlette")
 Mount = _http_modules.get("Mount")
 Route = _http_modules.get("Route")
+
+
+def build_sse_route_list(handle_sse, message_app, canonical_path: str = "/SSE") -> List[Any]:
+    """Build SSE routes that accept any casing of the canonical endpoint path."""
+    if not canonical_path.startswith("/"):
+        canonical_path = f"/{canonical_path}"
+
+    endpoint_name = canonical_path.lstrip("/")
+    variations = [canonical_path]
+
+    for chars in product(*[(char.lower(), char.upper()) if char.isalpha() else (char,) for char in endpoint_name]):
+        path = "/" + "".join(chars)
+        if path not in variations:
+            variations.append(path)
+
+    routes = [Route(path, endpoint=handle_sse) for path in variations]
+    routes.append(Mount("/messages/", app=message_app))
+    return routes
 
 
 # ============================================================================
@@ -651,10 +670,7 @@ class MCPAppBuilder:
                     raise
         
         web_app = Starlette(
-            routes=[
-                Route("/SSE", endpoint=handle_sse),
-                Mount("/messages/", app=sse.handle_post_message),
-            ]
+            routes=build_sse_route_list(handle_sse, sse.handle_post_message)
         )
         
         return web_app

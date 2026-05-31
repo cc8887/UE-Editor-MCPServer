@@ -70,7 +70,7 @@ try:
         STARLETTE_AVAILABLE, STARLETTE_IMPORT_ERRORS,
         types, Server, SseServerTransport, stdio_server,
         uvicorn, Starlette, Mount, Route,
-        ExecutionResult,
+        ExecutionResult, build_sse_route_list,
         ToolDefinition, TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE,
         get_mcp_tools
     )
@@ -81,7 +81,7 @@ except ImportError:
         STARLETTE_AVAILABLE, STARLETTE_IMPORT_ERRORS,
         types, Server, SseServerTransport, stdio_server,
         uvicorn, Starlette, Mount, Route,
-        ExecutionResult,
+        ExecutionResult, build_sse_route_list,
         ToolDefinition, TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE,
         get_mcp_tools
     )
@@ -1065,10 +1065,7 @@ class MCPStandaloneServer:
             _log("[MCPServer] WARNING: CORS middleware not available")
         
         web_app = Starlette(
-            routes=[
-                Route("/SSE", endpoint=handle_sse),
-                Mount("/messages/", app=sse.handle_post_message),
-            ],
+            routes=build_sse_route_list(handle_sse, sse.handle_post_message),
             middleware=middleware
         )
         

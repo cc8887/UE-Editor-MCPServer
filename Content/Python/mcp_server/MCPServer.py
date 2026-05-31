@@ -9,7 +9,7 @@ from .MCPCore import (
     STARLETTE_AVAILABLE, STARLETTE_IMPORT_ERRORS,
     types, Server, SseServerTransport,
     uvicorn, Starlette, Mount, Route,
-    ExecutionResult, CodeExecutor,
+    ExecutionResult, CodeExecutor, build_sse_route_list,
     get_mcp_tools, DEFAULT_TOOLS
 )
 
@@ -74,10 +74,7 @@ class MCPServer:
                         raise
             
             self._web_app = Starlette(
-                routes=[
-                    Route("/SSE", endpoint=handle_sse),
-                    Mount("/messages/", app=self._sse.handle_post_message),
-                ]
+                routes=build_sse_route_list(handle_sse, self._sse.handle_post_message)
             )
             config = uvicorn.Config(self._web_app, host=host, port=port, log_level="trace")
             self._server = uvicorn.Server(config)
