@@ -83,6 +83,46 @@ print("UE Editor MCP Server is working!")
 
 ---
 
+## 回归测试
+
+插件目录下提供 `test_mcp_client.py`，用于回归 `SSE` / `STDIO` / `both` 三种路径。
+
+### 编辑器归属与自动关闭
+
+- 默认情况下，脚本**不会**启动或关闭 UE 编辑器。
+- 传入 `--launch-editor` 后，脚本会自行拉起编辑器，并且只会在测试结束后关闭**这次回归脚本自己启动的编辑器**。
+- 如果你是手工打开编辑器再运行回归，脚本不会去关闭该实例。
+
+### 示例
+
+```cmd
+python test_mcp_client.py --transport stdio
+python test_mcp_client.py --launch-editor --transport stdio
+python test_mcp_client.py --launch-editor --transport both
+```
+
+> `--transport sse` 或 `--transport both` 仍要求你提前启动 SSE 服务，例如：`python main.py --transport sse`
+
+### 常用参数
+
+- `--launch-editor`：由回归脚本启动并托管编辑器生命周期
+- `--editor-exe`：指定编辑器可执行文件路径
+- `--uproject`：指定 `.uproject` 路径
+- `--editor-start-timeout`：启动后等待 Forwarder 端口就绪的超时时间
+- `--editor-shutdown-timeout`：发送退出请求后等待编辑器关闭的超时时间
+
+---
+
+## UE 侧自动化测试方向（本轮仅调研）
+
+当前建议先保留外部 Python harness 作为主回归路径，UE 侧测试后续优先考虑：
+
+1. 参考 `BlueprintLispTests.cpp` 先补基于 `IMPLEMENT_SIMPLE_AUTOMATION_TEST` 的插件自动化测试。
+2. 如果需要 PIE / 运行时世界，可复用 `AutoTestPIESession`。
+3. `AutomationDriver` / `AutomationDriverTests` 更适合编辑器 UI 工作流，后续采用前应先验证 `NullRHI` / headless 场景的可行性。
+
+---
+
 ## 命令行参数
 
 优先级：命令行 > 环境变量 > `.env` > 默认值

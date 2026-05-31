@@ -4,7 +4,7 @@
 # Easy to share with others for quick verification of UE-Editor-MCPServer.
 #
 # Prerequisites:
-#   1. UE Editor running with MCPForwarder plugin on port 8100
+#   1. UE Editor running with MCPForwarder plugin on port 8100, or pass --launch-editor
 #   2. For SSE: MCP SSE Server running on port 8099
 #   3. For STDIO: main.py (MCPStandalone) available in this directory
 #
@@ -13,6 +13,7 @@
 #   python test_mcp_client.py --transport sse          # SSE only
 #   python test_mcp_client.py --transport stdio        # STDIO only
 #   python test_mcp_client.py --transport both         # Both (default)
+#   python test_mcp_client.py --launch-editor --transport stdio
 #   python test_mcp_client.py --test ping              # Only ping test
 #   python test_mcp_client.py --test exec              # Only execute_command
 #   python test_mcp_client.py --test file              # Only excute_file
@@ -25,6 +26,7 @@ import os
 import argparse
 import time
 import uuid
+import subprocess
 from collections import deque
 from typing import Optional, List, Dict, Any
 from abc import ABC, abstractmethod
@@ -53,6 +55,18 @@ def info(msg):
 
 def warn(msg):
     print(f"  {YELLOW}!{RESET} {msg}")
+
+
+def _plugin_dir() -> str:
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _default_editor_exe() -> str:
+    return os.path.abspath(os.path.join(_plugin_dir(), "..", "..", "Binaries", "Win64", "MCPEditor.exe"))
+
+
+def _default_uproject() -> str:
+    return os.path.abspath(os.path.join(_plugin_dir(), "..", "..", "MCP.uproject"))
 
 
 # --- Abstract MCP Client Interface ---
@@ -829,6 +843,149 @@ TEST_ALIASES = {
 }
 
 
+async def wait_for_port(host: str, port: int, timeout: float, label: str, process=None) -> bool:
+    """Wait until a TCP endpoint starts accepting connections."""
+    deadline = time.monotonic() + timeout
+    last_error = None
+
+    while time.monotonic() < deadline:
+        if process is not None and process.returncode is not None:
+            fail(f"{label} exited before {host}:{port} became ready (rc={process.returncode})")
+            return False
+
+        try:
+            reader, writer = await asyncio.open_connection(host, port)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            ok(f"{label} is listening on {host}:{port}")
+            return True
+        except (ConnectionRefusedError, OSError) as e:
+            last_error = e
+            await asyncio.sleep(1.0)
+
+    fail(f"Timed out waiting for {label} on {host}:{port}: {last_error}")
+    return False
+
+
+async def terminate_process(process: Optional[asyncio.subprocess.Process], label: str, timeout: float = 10.0) -> bool:
+    """Terminate a subprocess, escalating to kill if needed."""
+    if process is None or process.returncode is not None:
+        return True
+
+    try:
+        process.terminate()
+    except ProcessLookupError:
+        return True
+
+    try:
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+        ok(f"{label} exited")
+        return True
+    except asyncio.TimeoutError:
+        warn(f"{label} did not exit after terminate(); killing")
+        try:
+            process.kill()
+        except ProcessLookupError:
+            return True
+        await process.wait()
+        ok(f"{label} killed")
+        return True
+
+
+async def launch_editor_if_requested(args) -> Optional[asyncio.subprocess.Process]:
+    """Launch the editor only when explicitly requested by the harness."""
+    if not args.launch_editor:
+        return None
+
+    editor_exe = os.path.abspath(args.editor_exe)
+    uproject = os.path.abspath(args.uproject)
+
+    if not os.path.isfile(editor_exe):
+        fail(f"Editor executable not found: {editor_exe}")
+        return None
+    if not os.path.isfile(uproject):
+        fail(f"Project file not found: {uproject}")
+        return None
+
+    command = [
+        editor_exe,
+        uproject,
+        "-NullRHI",
+        "-RenderOffScreen",
+        "-Unattended",
+        "-NoSplash",
+        "-NoCompile",
+        "-DisablePlugins=UEWorktree",
+    ]
+
+    info(f"Launching editor: {editor_exe}")
+    creationflags = 0
+    if os.name == "nt" and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    except Exception as e:
+        fail(f"Failed to launch editor: {e}")
+        return None
+
+    if await wait_for_port(args.editor_host, args.editor_port, args.editor_start_timeout, "Editor forwarder", process):
+        return process
+
+    await terminate_process(process, "Owned editor")
+    return None
+
+
+async def request_editor_shutdown(stdio_script: Optional[str], editor_host: str, editor_port: int) -> bool:
+    """Try to request a graceful editor shutdown through MCP."""
+    info("Requesting editor shutdown via execute_command")
+    client = MCPStdioClient(server_script=stdio_script, editor_host=editor_host, editor_port=editor_port)
+
+    try:
+        if not await client.connect():
+            return False
+        if not await client.initialize():
+            return False
+
+        result = await client.call_tool("execute_command", {
+            "code": "import unreal\nprint('Requesting editor shutdown')\nunreal.SystemLibrary.quit_editor()"
+        })
+        text = _extract_text(result).strip()
+        if text:
+            ok(text)
+        return bool(result) and not _has_error(result)
+    finally:
+        await client.close()
+
+
+async def shutdown_owned_editor(process: Optional[asyncio.subprocess.Process], args):
+    """Gracefully stop a harness-owned editor, with terminate/kill fallback."""
+    if process is None or process.returncode is not None:
+        return
+
+    graceful = await request_editor_shutdown(args.stdio_script, args.editor_host, args.editor_port)
+
+    try:
+        await asyncio.wait_for(process.wait(), timeout=args.editor_shutdown_timeout)
+        ok("Owned editor exited after regression")
+        return
+    except asyncio.TimeoutError:
+        if graceful:
+            warn("Owned editor did not exit after graceful shutdown request")
+        else:
+            warn("Graceful shutdown was unavailable; terminating owned editor")
+
+    await terminate_process(process, "Owned editor")
+
+
 # --- Runner ---
 
 async def run_transport_tests(client: MCPClientBase, test_suite: list, test_filter: str = None):
@@ -892,27 +1049,37 @@ async def run_all(args):
     print(f"{BOLD}UE-Editor-MCPServer Dual-Transport Regression Test{RESET}")
     print("=" * 60)
     print(f"Transport: {args.transport}")
+    print(f"Launch editor: {'yes' if args.launch_editor else 'no'}")
     if args.test:
         print(f"Filter: {args.test}")
     print()
 
     all_results = []
+    owned_editor = None
 
-    # --- SSE ---
-    if args.transport in ("sse", "both"):
-        client = MCPSSEClient(args.mcp_url)
-        results = await run_transport_tests(client, SSE_TESTS, args.test)
-        all_results.extend(results)
+    try:
+        owned_editor = await launch_editor_if_requested(args)
+        if args.launch_editor and owned_editor is None:
+            sys.exit(1)
 
-    # --- STDIO ---
-    if args.transport in ("stdio", "both"):
-        client = MCPStdioClient(
-            server_script=args.stdio_script,
-            editor_port=args.editor_port,
-            editor_host=args.editor_host,
-        )
-        results = await run_transport_tests(client, STDIO_TESTS, args.test)
-        all_results.extend(results)
+        # --- SSE ---
+        if args.transport in ("sse", "both"):
+            client = MCPSSEClient(args.mcp_url)
+            results = await run_transport_tests(client, SSE_TESTS, args.test)
+            all_results.extend(results)
+
+        # --- STDIO ---
+        if args.transport in ("stdio", "both"):
+            client = MCPStdioClient(
+                server_script=args.stdio_script,
+                editor_port=args.editor_port,
+                editor_host=args.editor_host,
+            )
+            results = await run_transport_tests(client, STDIO_TESTS, args.test)
+            all_results.extend(results)
+    finally:
+        if owned_editor is not None:
+            await shutdown_owned_editor(owned_editor, args)
 
     # --- Summary ---
     print(f"\n{'=' * 60}")
@@ -942,6 +1109,7 @@ Examples:
   python test_mcp_client.py --transport stdio        # STDIO only
   python test_mcp_client.py --test ping              # Single test on selected transport(s)
   python test_mcp_client.py --transport stdio --test error
+  python test_mcp_client.py --launch-editor --transport stdio
 """
     )
     parser.add_argument(
@@ -970,6 +1138,33 @@ Examples:
         "--editor-host",
         default="127.0.0.1",
         help="Editor forwarder host (default: 127.0.0.1)",
+    )
+    parser.add_argument(
+        "--launch-editor",
+        action="store_true",
+        help="Launch the editor for this regression run and auto-close it afterward",
+    )
+    parser.add_argument(
+        "--editor-exe",
+        default=_default_editor_exe(),
+        help=f"Path to the editor executable when --launch-editor is used (default: {_default_editor_exe()})",
+    )
+    parser.add_argument(
+        "--uproject",
+        default=_default_uproject(),
+        help=f"Path to the .uproject when --launch-editor is used (default: {_default_uproject()})",
+    )
+    parser.add_argument(
+        "--editor-start-timeout",
+        type=float,
+        default=120.0,
+        help="Seconds to wait for the editor forwarder port after launching the editor (default: 120)",
+    )
+    parser.add_argument(
+        "--editor-shutdown-timeout",
+        type=float,
+        default=30.0,
+        help="Seconds to wait for a harness-owned editor to exit after shutdown request (default: 30)",
     )
     parser.add_argument(
         "--test",
