@@ -34,6 +34,7 @@ Content/Python/mcp_server/*
 !Content/Python/mcp_server/MCPServer.py
 !Content/Python/mcp_server/MCPStandalone.py
 !Content/Python/mcp_server/Start.py
+!Content/Python/mcp_server/UEProcessManager.py
 
 # IDE related
 .vs/

@@ -18,6 +18,9 @@
 #   python test_mcp_client.py --test exec              # Only execute_command
 #   python test_mcp_client.py --test file              # Only excute_file
 #   python test_mcp_client.py --test error             # Only error handling
+#   python test_mcp_client.py --test list_tools        # Only base tool discovery
+#   python test_mcp_client.py --test list_project_tools \
+#       --project E:\UE5Projects\Foo\Foo.uproject      # Verify open_editor/close_editor are exposed
 
 import asyncio
 import json
@@ -122,6 +125,10 @@ class MCPSSEClient(MCPClientBase):
         self._response_data = {}
         self._recv_task = None
         self._initialized = False
+        # SSE clients connect to an already-running server; the harness has no
+        # control over whether it was started with --project. The tool-discovery
+        # tests use this attribute to decide which expectations apply.
+        self.editor_project: Optional[str] = None
 
     @property
     def transport_name(self) -> str:
@@ -383,18 +390,23 @@ class MCPSSEClient(MCPClientBase):
 class MCPStdioClient(MCPClientBase):
     """MCP STDIO client - spawns MCPStandalone as subprocess, communicates via stdin/stdout."""
 
-    def __init__(self, server_script: str = None, editor_port: int = 8100, editor_host: str = "127.0.0.1"):
+    def __init__(self, server_script: str = None, editor_port: int = 8100,
+                 editor_host: str = "127.0.0.1", editor_project: Optional[str] = None):
         """
         Args:
             server_script: Path to main.py (defaults to main.py in this directory)
             editor_port: Editor forwarder port
             editor_host: Editor forwarder host
+            editor_project: Optional .uproject path; passed as --project to MCPStandalone
+                so the tool-discovery test can verify open_editor / close_editor
+                are exposed when (and only when) a project is configured.
         """
         if server_script is None:
             server_script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
         self.server_script = server_script
         self.editor_port = editor_port
         self.editor_host = editor_host
+        self.editor_project = editor_project
         self._process: Optional[asyncio.subprocess.Process] = None
         self._response_futures: Dict[str, asyncio.Future] = {}
         self._recv_task: Optional[asyncio.Task] = None
@@ -416,17 +428,32 @@ class MCPStdioClient(MCPClientBase):
 
         info(f"Spawning STDIO server: {self.server_script}")
         info(f"Editor target: {self.editor_host}:{self.editor_port}")
+        if self.editor_project:
+            info(f"Project (enables open_editor/close_editor): {self.editor_project}")
 
         lock_name = f"MCPStandalone-stdio-{uuid.uuid4().hex}.lock"
         env = os.environ.copy()
         env["MCP_STANDALONE_LOCK_NAME"] = lock_name
+        # Force EDITOR_PROJECT off in the child env unless this client opted in,
+        # otherwise a stray .env value would leak project tools into tests that
+        # explicitly want to verify their absence.
+        if self.editor_project is None:
+            env.pop("EDITOR_PROJECT", None)
+        else:
+            env["EDITOR_PROJECT"] = self.editor_project
+
+        cmd = [
+            sys.executable, self.server_script,
+            "--transport", "stdio",
+            "--editor-host", self.editor_host,
+            "--editor-port", str(self.editor_port),
+        ]
+        if self.editor_project:
+            cmd.extend(["--project", self.editor_project])
 
         try:
             self._process = await asyncio.create_subprocess_exec(
-                sys.executable, self.server_script,
-                "--transport", "stdio",
-                "--editor-host", self.editor_host,
-                "--editor-port", str(self.editor_port),
+                *cmd,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -668,6 +695,163 @@ def _has_error(result):
     return False
 
 
+# --- Expected Tool Specifications ---
+#
+# Source of truth for the discovery test. Each entry mirrors the
+# ToolDefinition declared in Content/Python/mcp_server/MCPCore.py.
+#
+# Fields:
+#   required:      properties that MUST appear in inputSchema.required
+#   properties:    expected (key -> expected JSON Schema "type") mapping
+#                  for inputSchema.properties; checked as a subset
+#   keywords:      lowercase substrings that must appear in description
+#                  (sanity check: prevents accidentally swapping descriptions)
+
+EXPECTED_BASE_TOOLS = {
+    "execute_command": {
+        "required": ["code"],
+        "properties": {"code": "string"},
+        "keywords": ["python", "unreal"],
+    },
+    "excute_file": {  # spelled this way for backward compatibility
+        "required": ["file"],
+        "properties": {"file": "string"},
+        "keywords": ["python", "file"],
+    },
+    "get_editor_state": {
+        "required": [],
+        "properties": {},
+        "keywords": ["state"],
+    },
+}
+
+EXPECTED_PROJECT_TOOLS = {
+    "open_editor": {
+        "required": [],
+        "properties": {"timeout_sec": "integer"},
+        "keywords": ["editor", "ready"],
+    },
+    "close_editor": {
+        "required": [],
+        "properties": {"timeout_sec": "integer"},
+        "keywords": ["close", "editor"],
+    },
+}
+
+
+def _validate_tool_schema(tool: Dict[str, Any], expected: Dict[str, Any]) -> List[str]:
+    """
+    Validate a tool's structure against an expected spec.
+
+    Returns a list of error strings (empty == valid).
+    """
+    errors: List[str] = []
+    name = tool.get("name", "<no name>")
+
+    # description present and non-empty
+    desc = tool.get("description") or ""
+    if not isinstance(desc, str) or not desc.strip():
+        errors.append(f"{name}: missing/empty description")
+    else:
+        desc_lower = desc.lower()
+        for kw in expected.get("keywords", []):
+            if kw.lower() not in desc_lower:
+                errors.append(
+                    f"{name}: description missing keyword '{kw}' (got: '{desc[:80]}...')"
+                )
+
+    # inputSchema is a JSON object schema
+    schema = tool.get("inputSchema")
+    if not isinstance(schema, dict):
+        errors.append(f"{name}: inputSchema is not an object")
+        return errors
+
+    if schema.get("type") != "object":
+        errors.append(f"{name}: inputSchema.type != 'object' (got {schema.get('type')!r})")
+
+    # properties: each expected key must exist with the expected JSON-Schema type
+    actual_props = schema.get("properties") or {}
+    if not isinstance(actual_props, dict):
+        errors.append(f"{name}: inputSchema.properties is not an object")
+        actual_props = {}
+
+    for prop, expected_type in expected.get("properties", {}).items():
+        if prop not in actual_props:
+            errors.append(f"{name}: missing property '{prop}' in inputSchema.properties")
+            continue
+        prop_def = actual_props[prop]
+        if not isinstance(prop_def, dict):
+            errors.append(f"{name}: property '{prop}' is not an object")
+            continue
+        actual_type = prop_def.get("type")
+        if actual_type != expected_type:
+            errors.append(
+                f"{name}: property '{prop}' type mismatch "
+                f"(expected {expected_type!r}, got {actual_type!r})"
+            )
+
+    # required fields
+    actual_required = set(schema.get("required") or [])
+    expected_required = set(expected.get("required", []))
+    missing_required = expected_required - actual_required
+    if missing_required:
+        errors.append(
+            f"{name}: missing required field(s) {sorted(missing_required)} "
+            f"(got required={sorted(actual_required)})"
+        )
+
+    return errors
+
+
+def _validate_tool_set(
+    tools: List[Dict[str, Any]],
+    expected_specs: Dict[str, Dict[str, Any]],
+    *,
+    must_be_absent: Optional[set] = None,
+) -> bool:
+    """
+    Validate a returned tool list:
+    - every tool in `expected_specs` is present and schema-valid
+    - any tool name in `must_be_absent` does NOT appear
+
+    Returns True iff all checks pass. Prints details via ok/warn/fail.
+    """
+    tool_names = [t.get("name") for t in tools if isinstance(t, dict)]
+    by_name = {t.get("name"): t for t in tools if isinstance(t, dict)}
+
+    info(f"Server reported {len(tools)} tool(s): {sorted(tool_names)}")
+
+    all_passed = True
+
+    # Required tools present + schema-valid
+    for tool_name, spec in expected_specs.items():
+        if tool_name not in by_name:
+            fail(f"Missing required tool: {tool_name}")
+            all_passed = False
+            continue
+        errs = _validate_tool_schema(by_name[tool_name], spec)
+        if errs:
+            fail(f"Schema problems for '{tool_name}':")
+            for e in errs:
+                warn(f"    {e}")
+            all_passed = False
+        else:
+            desc_preview = (by_name[tool_name].get("description") or "")[:60]
+            ok(f"{tool_name}: schema OK — {desc_preview}")
+
+    # Tools that MUST NOT appear (e.g. project tools when project not configured)
+    if must_be_absent:
+        leaked = [n for n in must_be_absent if n in by_name]
+        if leaked:
+            fail(f"Unexpectedly exposed tool(s): {leaked}")
+            all_passed = False
+        else:
+            absent_list = sorted(must_be_absent)
+            ok(f"Confirmed absent (project not configured): {absent_list}")
+
+    return all_passed
+
+
 # --- Test Cases (transport-agnostic) ---
 
 async def test_initialize(client: MCPClientBase):
@@ -679,29 +863,59 @@ async def test_initialize(client: MCPClientBase):
 
 
 async def test_list_tools(client: MCPClientBase):
-    """Test: List tools returns expected tool set."""
-    print(f"\n[Test] List Tools ({client.transport_name})")
+    """
+    Test: tools/list discovery returns all base tools with valid schemas.
+
+    Validates for each base tool (execute_command, excute_file, get_editor_state):
+    - tool is present in the returned list
+    - description is non-empty and contains expected keywords
+    - inputSchema.type == "object"
+    - inputSchema.properties contains the expected props with correct types
+    - inputSchema.required matches the expected set
+
+    When the client did NOT pass --project, also asserts that the project-only
+    tools (open_editor / close_editor) are absent — guarding against accidentally
+    exposing process-management tools without a project configured.
+    """
+    print(f"\n[Test] Tool discovery — base tools ({client.transport_name})")
     tools = await client.list_tools()
 
     if not tools:
-        fail("No tools returned")
+        fail("tools/list returned no tools")
         return False
 
-    tool_names = [t.get("name") for t in tools]
-    expected = {"execute_command", "excute_file", "get_editor_state"}
-    found = expected.intersection(set(tool_names))
+    has_project = bool(getattr(client, "editor_project", None))
+    must_be_absent = None if has_project else set(EXPECTED_PROJECT_TOOLS.keys())
 
-    if found == expected:
-        ok(f"All expected tools present: {sorted(expected)}")
-        for t in tools:
-            desc = t.get("description", "")[:60]
-            info(f"  {t['name']}: {desc}")
+    return _validate_tool_set(
+        tools,
+        EXPECTED_BASE_TOOLS,
+        must_be_absent=must_be_absent,
+    )
+
+
+async def test_list_project_tools(client: MCPClientBase):
+    """
+    Test: when --project is configured, tools/list ALSO exposes the
+    process-management tools open_editor / close_editor with valid schemas.
+
+    Skipped (returns True with a warning) when the client was not started with
+    a project — the base tool discovery test already verifies they are absent
+    in that case.
+    """
+    print(f"\n[Test] Tool discovery — project tools ({client.transport_name})")
+
+    if not getattr(client, "editor_project", None):
+        warn("Client not started with --project; skipping project tool discovery check")
+        info("Use `--project <path/to/.uproject>` to exercise this test")
         return True
-    else:
-        missing = expected - found
-        fail(f"Missing tools: {missing}")
-        warn(f"Got: {tool_names}")
+
+    tools = await client.list_tools()
+    if not tools:
+        fail("tools/list returned no tools")
         return False
+
+    return _validate_tool_set(tools, EXPECTED_PROJECT_TOOLS)
 
 
 async def test_get_editor_state(client: MCPClientBase):
@@ -810,7 +1024,8 @@ async def test_error_handling(client: MCPClientBase):
 # All tests available for SSE (original 5 e2e tests mapped to new functions)
 SSE_TESTS = [
     ("initialize", "Initialize Handshake", test_initialize),
-    ("list_tools", "List Tools", test_list_tools),
+    ("list_tools", "List Tools (base discovery)", test_list_tools),
+    ("list_project_tools", "List Tools (project discovery)", test_list_project_tools),
     ("ping", "get_editor_state", test_get_editor_state),
     ("exec_simple", "Execute Simple Expression", test_execute_command),
     ("exec_unreal", "Execute Unreal API", test_execute_unreal_api),
@@ -821,7 +1036,8 @@ SSE_TESTS = [
 # STDIO tests: initialize/list_tools/get_editor_state/execute_command/excute_file/error
 STDIO_TESTS = [
     ("initialize", "Initialize Handshake", test_initialize),
-    ("list_tools", "List Tools", test_list_tools),
+    ("list_tools", "List Tools (base discovery)", test_list_tools),
+    ("list_project_tools", "List Tools (project discovery)", test_list_project_tools),
     ("ping", "get_editor_state", test_get_editor_state),
     ("exec_simple", "Execute Simple Expression", test_execute_command),
     ("file", "Execute Python File", test_execute_file),
@@ -841,6 +1057,10 @@ TEST_ALIASES = {
     "init": "initialize",
     "list_tools": "list_tools",
     "tools": "list_tools",
+    "list_project_tools": "list_project_tools",
+    "project_tools": "list_project_tools",
+    "discover": "list_tools",
+    "discovery": "list_tools",
 }
 
 
@@ -1066,6 +1286,10 @@ async def run_all(args):
         # --- SSE ---
         if args.transport in ("sse", "both"):
             client = MCPSSEClient(args.mcp_url)
+            # Surface --project to the SSE discovery test so it can adapt.
+            # Note: we cannot inject --project into an externally-running SSE
+            # server, so the user must have started it that way themselves.
+            client.editor_project = args.project
             results = await run_transport_tests(client, SSE_TESTS, args.test)
             all_results.extend(results)
 
@@ -1075,6 +1299,7 @@ async def run_all(args):
                 server_script=args.stdio_script,
                 editor_port=args.editor_port,
                 editor_host=args.editor_host,
+                editor_project=args.project,
             )
             results = await run_transport_tests(client, STDIO_TESTS, args.test)
             all_results.extend(results)
@@ -1171,6 +1396,16 @@ Examples:
         "--test",
         default=None,
         help=f"Run a specific test. Options: {', '.join(sorted(TEST_ALIASES.keys()))}",
+    )
+    parser.add_argument(
+        "--project",
+        default=None,
+        help=(
+            "Path to a .uproject. STDIO: passed as --project to MCPStandalone "
+            "so the discovery test verifies open_editor / close_editor are exposed. "
+            "SSE: only flips the discovery test's expectations — the user must "
+            "have started the SSE server with --project / EDITOR_PROJECT themselves."
+        ),
     )
 
     args = parser.parse_args()

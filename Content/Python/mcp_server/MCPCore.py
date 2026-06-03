@@ -199,6 +199,46 @@ TOOL_GET_IMPORTED_MODULES = ToolDefinition(
     }
 )
 
+TOOL_OPEN_EDITOR = ToolDefinition(
+    name="open_editor",
+    description=(
+        "Ensure the Unreal Editor for the configured project is fully running and ready. "
+        "Internally regenerates project files if the .sln is stale, rebuilds the editor "
+        "module if any source file is newer than the DLL, launches the editor if it is "
+        "not running, then waits until the log reports 'Engine is initialized'. "
+        "Requires a project to be configured via --project (or EDITOR_PROJECT env var). "
+        "Returns 'READY' on success, or 'ERROR [stage] ...' with a log tail on failure."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "timeout_sec": {
+                "type": "integer",
+                "description": "Maximum seconds to wait for the editor to become ready (default: 600)."
+            }
+        }
+    }
+)
+
+TOOL_CLOSE_EDITOR = ToolDefinition(
+    name="close_editor",
+    description=(
+        "Gracefully close the Unreal Editor for the configured project and wait until "
+        "the process fully exits. If the editor does not exit within the graceful timeout, "
+        "it is force-killed. Requires a project to be configured via --project "
+        "(or EDITOR_PROJECT env var). Returns 'CLOSED' on success or 'ERROR ...' on failure."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "timeout_sec": {
+                "type": "integer",
+                "description": "Maximum seconds to wait for graceful shutdown before force-kill (default: 120)."
+            }
+        }
+    }
+)
+
 # 默认工具列表
 DEFAULT_TOOLS = [TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE]
 
