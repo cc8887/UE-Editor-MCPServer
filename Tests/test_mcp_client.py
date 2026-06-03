@@ -58,7 +58,8 @@ def warn(msg):
 
 
 def _plugin_dir() -> str:
-    return os.path.dirname(os.path.abspath(__file__))
+    # This file lives in Tests/ -- go up one level to reach the plugin root
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _default_editor_exe() -> str:
@@ -390,7 +391,7 @@ class MCPStdioClient(MCPClientBase):
             editor_host: Editor forwarder host
         """
         if server_script is None:
-            server_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+            server_script = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "main.py")
         self.server_script = server_script
         self.editor_port = editor_port
         self.editor_host = editor_host
