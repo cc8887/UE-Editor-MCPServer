@@ -236,6 +236,24 @@ class MCPForwarder:
         """处理待处理的请求队列"""
         while self._pending_requests:
             client, request = self._pending_requests.pop(0)
+
+            msg_type = request.get("type")
+            request_id = request.get("id")
+
+            # 若正在执行，拒绝新的 execute/execute_file 请求，返回错误
+            if msg_type in ("execute", "execute_file"):
+                if self._state == ForwarderState.EXECUTING:
+                    error_response = {
+                        "type": "result",
+                        "id": request_id,
+                        "success": False,
+                        "error": "Another client is currently executing. Please retry later.",
+                        "busy": True
+                    }
+                    self._pending_responses.append((client, error_response))
+                    self._log(f"MCPForwarder: Rejected {request_id} (busy)")
+                    continue
+
             response = self._handle_request(request)
             if response is not None:
                 self._pending_responses.append((client, response))

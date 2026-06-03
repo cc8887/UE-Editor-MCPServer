@@ -1119,13 +1119,7 @@ class MCPStandaloneServer:
 def main():
     """主函数 - 命令行入口"""
     import argparse
-    
-    # 单实例锁：防止多个 MCPStandalone 进程同时运行
-    _lock_fd = _acquire_single_instance_lock()
-    if _lock_fd is None:
-        _log("[MCPServer] Another MCPStandalone instance is already running. Exiting.")
-        sys.exit(0)
-    
+
     # 先加载配置获取默认值
     config = load_config()
     
@@ -1186,8 +1180,21 @@ Note:
                         help='Enable debug mode for detailed logging')
     parser.add_argument('--mypy-enabled', action='store_true', default=None,
                         help='Enable mypy type checking (default: from config, usually disabled)')
-    
+    parser.add_argument('--single-instance', action='store_true', default=False,
+                        help='Enable single-instance mode (prevents multiple instances)')
+
     args = parser.parse_args()
+
+    # 单实例锁：默认禁用，可通过 --single-instance 或配置启用
+    if args.single_instance or config.get("single_instance", False):
+        _lock_fd = _acquire_single_instance_lock()
+        if _lock_fd is None:
+            _log("[MCPServer] Another MCPStandalone instance is already running. Exiting.")
+            sys.exit(0)
+        else:
+            _log("[MCPServer] Single-instance mode enabled")
+    else:
+        _log("[MCPServer] Multi-instance mode enabled (single_instance=false)")
     
     # 使用命令行参数覆盖配置文件的值
     mcp_host = args.mcp_host if args.mcp_host is not None else config["mcp_host"]

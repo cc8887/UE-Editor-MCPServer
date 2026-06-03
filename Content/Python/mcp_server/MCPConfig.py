@@ -183,12 +183,17 @@ def load_config(force_reload: bool = False) -> dict:
         print(f"[MCPConfig] Warning: Invalid EDITOR_PORT '{editor_port_str}', using default {DEFAULT_EDITOR_PORT}", file=sys.stderr)
         editor_port = DEFAULT_EDITOR_PORT
     
+    # 单实例模式（默认关闭，允许多个 MCPStandalone 实例）
+    single_instance_str = _get_config_value("MCP_SINGLE_INSTANCE", "false", env_config)
+    single_instance = single_instance_str.lower() == "true"
+
     _config_cache = {
         "mcp_port": mcp_port,
         "mcp_host": mcp_host,
         "editor_port": editor_port,
         "editor_host": editor_host,
         "mypy_enabled": mypy_enabled,
+        "single_instance": single_instance,
     }
     
     print(f"[MCPConfig] Configuration loaded:", file=sys.stderr)
