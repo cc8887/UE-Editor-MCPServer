@@ -1,6 +1,7 @@
 // Copyright Epic Games, Inc. All Rights Reserved.
 
 #include "MCPServer.h"
+#include "MCPPropertyPathLibrary.h"
 #include "MCPTeachingSessionManager.h"
 #include "Engine/Engine.h"
 #include "HAL/PlatformFilemanager.h"
@@ -260,6 +261,7 @@ void FMCPServerModule::StartupModule()
 		FConsoleCommandWithArgsDelegate::CreateStatic(&FMCPServerModule::StopTeachingConsoleCommand),
 		ECVF_Default);
 	UE_LOG(LogMCPServer, Log, TEXT("MCP Server module started, log capture functionality available"));
+	FMCPPropertyPathExtension::Register();
 }
 
 void FMCPServerModule::ShutdownModule()
@@ -303,6 +305,7 @@ void FMCPServerModule::ShutdownModule()
 	}
 	
 	bLogCaptureEnabled = false;
+	FMCPPropertyPathExtension::Unregister();
 	UE_LOG(LogMCPServer, Log, TEXT("MCP Server module shutdown"));
 }
 

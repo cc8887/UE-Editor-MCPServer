@@ -43,6 +43,9 @@ public class MCPServer : ModuleRules
 				"UnrealEd",
 				"Kismet",
 				"GameplayTags",
+				"ApplicationCore",  // FPlatformApplicationMisc::ClipboardCopy
+				"PropertyEditor",   // IPropertyHandle, UDetailRowMenuContext, RowContextMenuName
+				"ToolMenus",        // UToolMenus, UToolMenu, FToolMenuSection, FToolMenuEntry
 				// ... add private dependencies that you statically link with here ...	
 			}
 		);
