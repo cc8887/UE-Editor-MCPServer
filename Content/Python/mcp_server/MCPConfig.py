@@ -12,6 +12,7 @@ MCPConfig.py - MCP服务器配置管理
 - MCP_HOST: MCP服务器监听地址 (默认: 127.0.0.1)
 - EDITOR_PORT: 编辑器转发服务器端口 (默认: 8100)
 - EDITOR_HOST: 编辑器转发服务器地址 (默认: 127.0.0.1)
+- EDITOR_PROJECT: .uproject 绝对路径 (启用 open_editor / close_editor 工具)
 """
 
 import os
@@ -166,6 +167,7 @@ def load_config(force_reload: bool = False) -> dict:
     editor_port_str = _get_config_value("EDITOR_PORT", str(DEFAULT_EDITOR_PORT), env_config)
     editor_host = _get_config_value("EDITOR_HOST", DEFAULT_EDITOR_HOST, env_config)
     mypy_enabled_str = _get_config_value("MYPY_ENABLED", str(DEFAULT_MYPY_ENABLED), env_config)
+    editor_project = _get_config_value("EDITOR_PROJECT", "", env_config)
     
     # 解析布尔值
     mypy_enabled = mypy_enabled_str.lower() in ("true", "1", "yes")
@@ -194,12 +196,15 @@ def load_config(force_reload: bool = False) -> dict:
         "editor_host": editor_host,
         "mypy_enabled": mypy_enabled,
         "single_instance": single_instance,
+        "editor_project": editor_project.strip() if editor_project else "",
     }
-    
+
     print(f"[MCPConfig] Configuration loaded:", file=sys.stderr)
     print(f"  MCP Server: {mcp_host}:{mcp_port}", file=sys.stderr)
     print(f"  Editor Forwarder: {editor_host}:{editor_port}", file=sys.stderr)
     print(f"  MyPy Enabled: {mypy_enabled}", file=sys.stderr)
+    if _config_cache["editor_project"]:
+        print(f"  Editor Project: {_config_cache['editor_project']}", file=sys.stderr)
     
     return _config_cache
 

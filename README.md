@@ -31,11 +31,17 @@ uv sync
   "mcpServers": {
     "ue-editor": {
       "command": "uv",
-      "args": ["run", "--directory", "D:\\MCP\\Plugins\\UE-Editor-MCPServer", "python", "main.py"]
+      "args": [
+        "run", "--directory", "D:\\MCP\\Plugins\\UE-Editor-MCPServer",
+        "python", "main.py",
+        "--project", "D:\\MCP\\YourProj.uproject"
+      ]
     }
   }
 }
 ```
+
+> `--project` 指向 `.uproject` 路径，用于额外暴露 `open_editor` / `close_editor` 工具（自动 GPF/Build/启动/关闭编辑器）。省略则只暴露 `execute_command` / `excute_file` / `get_editor_state` 三个工具。
 
 #### SSE 模式
 
@@ -88,6 +94,7 @@ EDITOR_PORT=8100
 | `--mcp-port`     | MCP 监听端口（仅 SSE 模式）        | `8099`      |
 | `--editor-host`  | 编辑器 Forwarder 地址          | `127.0.0.1` |
 | `--editor-port`  | 编辑器 Forwarder 端口          | `8100`      |
+| `--project`      | `.uproject` 绝对路径，启用 `open_editor` / `close_editor` | 无 |
 | `--debug`        | 调试模式（输出详细日志到 stderr）      | 关闭          |
 | `--mypy-enabled` | 执行 Python 代码前启用 mypy 类型检查 | 关闭          |
 

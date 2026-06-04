@@ -3,3 +3,4 @@ anyio
 click
 starlette
 pywin32
+psutil>=5.9.0

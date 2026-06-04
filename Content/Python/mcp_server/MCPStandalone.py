@@ -72,9 +72,11 @@ try:
         uvicorn, Starlette, Mount, Route,
         ExecutionResult, build_sse_route_list,
         ToolDefinition, TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE,
+        TOOL_OPEN_EDITOR, TOOL_CLOSE_EDITOR,
         get_mcp_tools
     )
     from .MCPConfig import load_config, get_mcp_port, get_mcp_host, get_editor_port, get_editor_host
+    from .UEProcessManager import UEProject
 except ImportError:
     from MCPCore import (
         MCP_AVAILABLE, MCP_IMPORT_ERRORS,
@@ -83,9 +85,11 @@ except ImportError:
         uvicorn, Starlette, Mount, Route,
         ExecutionResult, build_sse_route_list,
         ToolDefinition, TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE,
+        TOOL_OPEN_EDITOR, TOOL_CLOSE_EDITOR,
         get_mcp_tools
     )
     from MCPConfig import load_config, get_mcp_port, get_mcp_host, get_editor_port, get_editor_host
+    from UEProcessManager import UEProject
 
 # CORS中间件
 try:
@@ -772,31 +776,36 @@ class EditorConnection:
 class MCPStandaloneServer:
     """
     独立MCP服务器
-    
+
     支持两种传输模式：
     - stdio: 由MCP客户端自动拉起，通过stdin/stdout通信
     - sse: 独立HTTP服务，通过SSE端点通信
-    
+
     功能：
     1. 提供MCP端点供外部客户端连接
     2. 将请求转发到UE编辑器执行
     3. 自动管理与编辑器的连接（重连机制）
+    4. 可选：托管编辑器进程的启动/关闭（open_editor / close_editor）
     """
-    
-    # 支持的工具列表
-    TOOLS = [TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE]
-    
-    def __init__(self, 
-                 mcp_host: str = "127.0.0.1", 
+
+    # 基础工具列表（永远可用，转发到编辑器内执行）
+    BASE_TOOLS = [TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE]
+
+    # 项目托管工具（仅在配置了 .uproject 时启用）
+    PROJECT_TOOLS = [TOOL_OPEN_EDITOR, TOOL_CLOSE_EDITOR]
+
+    def __init__(self,
+                 mcp_host: str = "127.0.0.1",
                  mcp_port: int = 8099,
                  editor_host: str = "127.0.0.1",
                  editor_port: int = 8100,
                  debug: bool = False,
                  mypy_exclude_paths: List[str] = None,
-                 mypy_enabled: bool = False):
+                 mypy_enabled: bool = False,
+                 editor_project: Optional[str] = None):
         """
         初始化MCP服务器
-        
+
         Args:
             mcp_host: MCP服务监听地址（仅SSE模式使用）
             mcp_port: MCP服务监听端口（仅SSE模式使用）
@@ -805,11 +814,30 @@ class MCPStandaloneServer:
             debug: 是否开启调试模式
             mypy_exclude_paths: MyPy检查时要排除的目录列表（绝对路径）
             mypy_enabled: 是否启用mypy类型检查
+            editor_project: .uproject 绝对路径；提供则启用 open_editor/close_editor 工具
         """
         self.mcp_host = mcp_host
         self.mcp_port = mcp_port
         self.debug = debug
-        
+
+        # 项目管理：仅当传入 .uproject 路径时启用 open_editor / close_editor
+        self.ue_project: Optional[UEProject] = None
+        if editor_project:
+            try:
+                self.ue_project = UEProject(editor_project)
+                _log(f"[MCPServer] Project: {self.ue_project.project_name}")
+                _log(f"[MCPServer] Engine root: {self.ue_project.engine_root}")
+            except Exception as e:
+                _log(f"[MCPServer] WARNING: Failed to initialize UEProject from "
+                     f"'{editor_project}': {e}")
+                _log("[MCPServer] open_editor / close_editor tools will be unavailable")
+                self.ue_project = None
+
+        # 动态组合工具列表
+        self.TOOLS = list(self.BASE_TOOLS)
+        if self.ue_project is not None:
+            self.TOOLS.extend(self.PROJECT_TOOLS)
+
         # 从环境变量读取排除路径（如果未指定）
         if mypy_exclude_paths is None:
             mypy_exclude_paths = []
@@ -821,16 +849,16 @@ class MCPStandaloneServer:
                     mypy_exclude_paths = [p.strip() for p in env_paths.split(';') if p.strip()]
                 elif env_paths.strip():
                     mypy_exclude_paths = [env_paths.strip()]
-        
+
         self.editor_connection = EditorConnection(
-            editor_host, editor_port, 
+            editor_host, editor_port,
             debug=debug,
             mypy_exclude_paths=mypy_exclude_paths,
             mypy_enabled=mypy_enabled
         )
         self.editor_connection.on_state_change = self._on_editor_state_change
         self.editor_connection.on_disconnected = self._on_editor_disconnected
-        
+
         self._tasks: List[asyncio.Task] = []
         self._running = False
         self._reconnect_event = asyncio.Event()
@@ -867,48 +895,53 @@ class MCPStandaloneServer:
     async def _handle_tool_call(self, name: str, arguments: dict) -> ExecutionResult:
         """
         处理工具调用
-        
+
         Args:
             name: 工具名称
             arguments: 工具参数
-            
+
         Returns:
             ExecutionResult 执行结果
         """
         if self.debug:
             _log(f"[DEBUG][MCPServer] Tool call: {name}")
             _log(f"[DEBUG][MCPServer] Arguments: {json.dumps(arguments, indent=2, ensure_ascii=False)[:300]}")
-        
-        # 检查编辑器连接状态
+
+        # 1) 进程管理工具：在 MCPStandalone 进程内本地执行（无需编辑器在线）
+        if name in ("open_editor", "close_editor"):
+            return await self._handle_project_tool(name, arguments)
+
+        # 2) 状态查询：可在断连时返回
+        if name == "get_editor_state":
+            state = self.editor_connection.state.value
+            return ExecutionResult(
+                success=True,
+                output=f"Editor connection state: {state}"
+            )
+
+        # 3) 其余工具需要转发到编辑器，前置检查连接状态
         if not self.editor_connection.is_connected:
             return ExecutionResult(
                 success=False,
                 error="Editor not connected. Please ensure Unreal Editor is running with the MCP Forwarder plugin.\n\n"
                       "The editor may have crashed or been closed. The server will automatically reconnect when the editor restarts."
             )
-        
+
         try:
             if name == "execute_command":
                 code = arguments.get('code', '')
                 # 始终进行类型检查
                 result = await self.editor_connection.execute_code(code)
                 return self._parse_editor_response(result)
-                
+
             elif name == "excute_file":
                 file_path = arguments.get('file', '')
                 result = await self.editor_connection.execute_file(file_path)
                 return self._parse_editor_response(result)
-            
-            elif name == "get_editor_state":
-                state = self.editor_connection.state.value
-                return ExecutionResult(
-                    success=True,
-                    output=f"Editor connection state: {state}"
-                )
-            
+
             else:
                 return ExecutionResult(success=False, error=f"Unknown tool: {name}")
-                
+
         except TimeoutError as e:
             return ExecutionResult(
                 success=False,
@@ -923,6 +956,58 @@ class MCPStandaloneServer:
             if self.debug:
                 import traceback
                 _log(f"[DEBUG][MCPServer] Tool call error: {e}")
+                _log(f"[DEBUG][MCPServer] Traceback:\n{traceback.format_exc()}")
+            return ExecutionResult(success=False, error=str(e))
+
+    async def _handle_project_tool(self, name: str, arguments: dict) -> ExecutionResult:
+        """
+        在 MCPStandalone 进程内执行 open_editor / close_editor。
+
+        这两个工具需要管理编辑器进程本身（启动/退出），不能转发到编辑器内执行。
+        UEProject 的相关方法是阻塞 IO，使用 asyncio.to_thread 避免阻塞事件循环。
+        """
+        if self.ue_project is None:
+            return ExecutionResult(
+                success=False,
+                error=(
+                    f"Tool '{name}' requires --project (or EDITOR_PROJECT env var) to be "
+                    "set to a valid .uproject path. None was configured for this server."
+                )
+            )
+
+        try:
+            if name == "open_editor":
+                timeout_sec = int(arguments.get("timeout_sec", 600))
+                result = await asyncio.to_thread(
+                    self.ue_project.open_editor, timeout_sec
+                )
+                # 启动成功后主动触发一次重连，缩短工具返回到 execute_command 可用的窗口
+                if isinstance(result, str) and result.startswith("READY"):
+                    self._reconnect_event.set()
+                success = isinstance(result, str) and result.startswith("READY")
+                return ExecutionResult(
+                    success=success,
+                    output=result if success else "",
+                    error="" if success else (result or "Unknown error"),
+                )
+
+            if name == "close_editor":
+                timeout_sec = int(arguments.get("timeout_sec", 120))
+                result = await asyncio.to_thread(
+                    self.ue_project.close_editor, timeout_sec
+                )
+                success = isinstance(result, str) and result.startswith("CLOSED")
+                return ExecutionResult(
+                    success=success,
+                    output=result if success else "",
+                    error="" if success else (result or "Unknown error"),
+                )
+
+            return ExecutionResult(success=False, error=f"Unknown project tool: {name}")
+        except Exception as e:
+            if self.debug:
+                import traceback
+                _log(f"[DEBUG][MCPServer] Project tool error: {e}")
                 _log(f"[DEBUG][MCPServer] Traceback:\n{traceback.format_exc()}")
             return ExecutionResult(success=False, error=str(e))
     
@@ -1182,6 +1267,10 @@ Note:
                         help='Enable mypy type checking (default: from config, usually disabled)')
     parser.add_argument('--single-instance', action='store_true', default=False,
                         help='Enable single-instance mode (prevents multiple instances)')
+    parser.add_argument('--project', default=None,
+                        help='Absolute path to .uproject. When provided, exposes the '
+                             'open_editor / close_editor tools that manage the editor '
+                             'process. Overrides the EDITOR_PROJECT env var / .env value.')
 
     args = parser.parse_args()
 
@@ -1204,7 +1293,8 @@ Note:
     debug = args.debug
     transport = args.transport
     mypy_enabled = args.mypy_enabled if args.mypy_enabled is not None else config.get("mypy_enabled", False)
-    
+    editor_project = args.project if args.project is not None else config.get("editor_project", "")
+
     _log("=" * 60)
     _log("MCP Standalone Server for Unreal Engine")
     _log("=" * 60)
@@ -1214,6 +1304,10 @@ Note:
     _log(f"Editor Forwarder: {editor_host}:{editor_port}")
     _log(f"Debug Mode: {'ENABLED' if debug else 'disabled'}")
     _log(f"MyPy Type Check: {'ENABLED' if mypy_enabled else 'disabled'}")
+    if editor_project:
+        _log(f"Editor Project: {editor_project} (open_editor / close_editor enabled)")
+    else:
+        _log("Editor Project: <not configured> (open_editor / close_editor disabled)")
     _log("=" * 60)
     _log("")
     _log("Connection detection: TCP connection state")
@@ -1235,7 +1329,8 @@ Note:
         editor_host=editor_host,
         editor_port=editor_port,
         debug=debug,
-        mypy_enabled=mypy_enabled
+        mypy_enabled=mypy_enabled,
+        editor_project=editor_project or None
     )
     
     try:
