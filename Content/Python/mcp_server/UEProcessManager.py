@@ -1,7 +1,8 @@
 """
 UEProcessManager.py - UE 编辑器进程管理
 
-从 ue_editor_proxy 项目中迁移而来，提供 open_editor / close_editor 能力。
+提供 open_editor / close_editor 能力。
+
 功能：
 1. 解析 .uproject 中的 EngineAssociation 定位引擎根目录
 2. 检测 .sln 与模块 DLL 是否过期，必要时执行 GenerateProjectFiles 与 Build
