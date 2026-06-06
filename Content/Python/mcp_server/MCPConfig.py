@@ -13,6 +13,13 @@ MCPConfig.py - MCP服务器配置管理
 - EDITOR_PORT: 编辑器转发服务器端口 (默认: 8100)
 - EDITOR_HOST: 编辑器转发服务器地址 (默认: 127.0.0.1)
 - EDITOR_PROJECT: .uproject 绝对路径 (启用 open_editor / close_editor 工具)
+
+open_editor / close_editor 内部超时（不暴露给 AI，仅 server 端使用）：
+- OPEN_SETTLE_SECONDS: 命中插件就绪信号后再等待多久让编辑器稳定 (默认: 20)
+- OPEN_READY_TIMEOUT: 未命中就绪信号时的最大等待时长 (默认: 600)
+- COMPILE_IDLE_TIMEOUT: 构建日志无新输出多久视为卡死 (默认: 120)
+- COMPILE_MAX_SECONDS: 编译总耗时绝对上限，覆盖全量编译 (默认: 7200，即 2 小时)
+- CLOSE_GRACEFUL_TIMEOUT: 优雅关闭等待时长，超时则强杀 (默认: 120)
 """
 
 import os
@@ -28,6 +35,18 @@ DEFAULT_EDITOR_HOST = "127.0.0.1"
 
 
 DEFAULT_MYPY_ENABLED = False
+
+# open_editor / close_editor 内部超时与阈值（不暴露给 AI，只在 server 内部使用）
+# Path A（无需编译）：命中插件就绪信号后再等多久让编辑器稳定
+DEFAULT_OPEN_SETTLE_SECONDS = 20
+# Path A 兜底：未命中就绪信号时的最大等待时长
+DEFAULT_OPEN_READY_TIMEOUT = 600
+# Path B（编译）：构建日志无新输出超过该秒数视为卡死
+DEFAULT_COMPILE_IDLE_TIMEOUT = 120
+# Path B：编译总耗时绝对上限（秒），覆盖全量编译，2 小时
+DEFAULT_COMPILE_MAX_SECONDS = 7200
+# close_editor：优雅关闭等待时长，超过则强杀
+DEFAULT_CLOSE_GRACEFUL_TIMEOUT = 120
 
 
 def _find_env_file() -> Optional[str]:
@@ -189,6 +208,26 @@ def load_config(force_reload: bool = False) -> dict:
     single_instance_str = _get_config_value("MCP_SINGLE_INSTANCE", "false", env_config)
     single_instance = single_instance_str.lower() == "true"
 
+    # open/close editor 内部超时（不暴露给 AI，仅 server 端使用）
+    def _parse_int(key: str, default: int) -> int:
+        raw = _get_config_value(key, str(default), env_config)
+        try:
+            return int(raw)
+        except ValueError:
+            print(
+                f"[MCPConfig] Warning: Invalid {key} '{raw}', using default {default}",
+                file=sys.stderr,
+            )
+            return default
+
+    open_settle_seconds = _parse_int("OPEN_SETTLE_SECONDS", DEFAULT_OPEN_SETTLE_SECONDS)
+    open_ready_timeout = _parse_int("OPEN_READY_TIMEOUT", DEFAULT_OPEN_READY_TIMEOUT)
+    compile_idle_timeout = _parse_int("COMPILE_IDLE_TIMEOUT", DEFAULT_COMPILE_IDLE_TIMEOUT)
+    compile_max_seconds = _parse_int("COMPILE_MAX_SECONDS", DEFAULT_COMPILE_MAX_SECONDS)
+    close_graceful_timeout = _parse_int(
+        "CLOSE_GRACEFUL_TIMEOUT", DEFAULT_CLOSE_GRACEFUL_TIMEOUT
+    )
+
     _config_cache = {
         "mcp_port": mcp_port,
         "mcp_host": mcp_host,
@@ -197,6 +236,11 @@ def load_config(force_reload: bool = False) -> dict:
         "mypy_enabled": mypy_enabled,
         "single_instance": single_instance,
         "editor_project": editor_project.strip() if editor_project else "",
+        "open_settle_seconds": open_settle_seconds,
+        "open_ready_timeout": open_ready_timeout,
+        "compile_idle_timeout": compile_idle_timeout,
+        "compile_max_seconds": compile_max_seconds,
+        "close_graceful_timeout": close_graceful_timeout,
     }
 
     print(f"[MCPConfig] Configuration loaded:", file=sys.stderr)

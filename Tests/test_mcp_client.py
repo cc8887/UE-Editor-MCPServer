@@ -728,12 +728,12 @@ EXPECTED_BASE_TOOLS = {
 EXPECTED_PROJECT_TOOLS = {
     "open_editor": {
         "required": [],
-        "properties": {"timeout_sec": "integer"},
+        "properties": {},
         "keywords": ["editor", "ready"],
     },
     "close_editor": {
         "required": [],
-        "properties": {"timeout_sec": "integer"},
+        "properties": {},
         "keywords": ["close", "editor"],
     },
 }

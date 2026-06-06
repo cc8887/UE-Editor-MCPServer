@@ -202,40 +202,27 @@ TOOL_GET_IMPORTED_MODULES = ToolDefinition(
 TOOL_OPEN_EDITOR = ToolDefinition(
     name="open_editor",
     description=(
-        "Ensure the Unreal Editor for the configured project is fully running and ready. "
-        "Internally regenerates project files if the .sln is stale, rebuilds the editor "
-        "module if any source file is newer than the DLL, launches the editor if it is "
-        "not running, then waits until the log reports 'Engine is initialized'. "
-        "Requires a project to be configured via --project (or EDITOR_PROJECT env var). "
-        "Returns 'READY' on success, or 'ERROR [stage] ...' with a log tail on failure."
+        "Open the Unreal Editor for the configured project and wait until it is ready "
+        "to receive commands. Before opening, auto-checks whether compilation is needed: "
+        "regenerates project files if .sln is stale, and rebuilds the editor module if "
+        "any source file is newer than the DLL."
     ),
     input_schema={
         "type": "object",
-        "properties": {
-            "timeout_sec": {
-                "type": "integer",
-                "description": "Maximum seconds to wait for the editor to become ready (default: 600)."
-            }
-        }
+        "properties": {}
     }
 )
 
 TOOL_CLOSE_EDITOR = ToolDefinition(
     name="close_editor",
     description=(
-        "Gracefully close the Unreal Editor for the configured project and wait until "
-        "the process fully exits. If the editor does not exit within the graceful timeout, "
-        "it is force-killed. Requires a project to be configured via --project "
-        "(or EDITOR_PROJECT env var). Returns 'CLOSED' on success or 'ERROR ...' on failure."
+        "Close the Unreal Editor for the configured project gracefully and wait until "
+        "the process fully exits. Falls back to force-kill if graceful shutdown does "
+        "not complete."
     ),
     input_schema={
         "type": "object",
-        "properties": {
-            "timeout_sec": {
-                "type": "integer",
-                "description": "Maximum seconds to wait for graceful shutdown before force-kill (default: 120)."
-            }
-        }
+        "properties": {}
     }
 )
 

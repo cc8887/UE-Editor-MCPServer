@@ -821,10 +821,19 @@ class MCPStandaloneServer:
         self.debug = debug
 
         # 项目管理：仅当传入 .uproject 路径时启用 open_editor / close_editor
+        # open/close 内部超时与阈值通过 MCPConfig 注入，不暴露给 MCP 客户端
         self.ue_project: Optional[UEProject] = None
         if editor_project:
             try:
-                self.ue_project = UEProject(editor_project)
+                _cfg = load_config()
+                self.ue_project = UEProject(
+                    editor_project,
+                    open_settle_seconds=_cfg.get("open_settle_seconds", 20),
+                    open_ready_timeout=_cfg.get("open_ready_timeout", 600),
+                    compile_idle_timeout=_cfg.get("compile_idle_timeout", 120),
+                    compile_max_seconds=_cfg.get("compile_max_seconds", 7200),
+                    close_graceful_timeout=_cfg.get("close_graceful_timeout", 120),
+                )
                 _log(f"[MCPServer] Project: {self.ue_project.project_name}")
                 _log(f"[MCPServer] Engine root: {self.ue_project.engine_root}")
             except Exception as e:
@@ -977,9 +986,22 @@ class MCPStandaloneServer:
 
         try:
             if name == "open_editor":
-                timeout_sec = int(arguments.get("timeout_sec", 600))
+                # ready_check：尝试 TCP 连到编辑器内 MCP Forwarder。
+                # 连得上即视为引擎可接收命令；连不上则 fallback 到日志扫描。
+                editor_host = self.editor_connection.host
+                editor_port = self.editor_connection.port
+
+                def _ready_check() -> bool:
+                    try:
+                        with socket.create_connection(
+                            (editor_host, editor_port), timeout=1.0
+                        ):
+                            return True
+                    except OSError:
+                        return False
+
                 result = await asyncio.to_thread(
-                    self.ue_project.open_editor, timeout_sec
+                    self.ue_project.open_editor, _ready_check
                 )
                 # 启动成功后主动触发一次重连，缩短工具返回到 execute_command 可用的窗口
                 if isinstance(result, str) and result.startswith("READY"):
@@ -992,10 +1014,7 @@ class MCPStandaloneServer:
                 )
 
             if name == "close_editor":
-                timeout_sec = int(arguments.get("timeout_sec", 120))
-                result = await asyncio.to_thread(
-                    self.ue_project.close_editor, timeout_sec
-                )
+                result = await asyncio.to_thread(self.ue_project.close_editor)
                 success = isinstance(result, str) and result.startswith("CLOSED")
                 return ExecutionResult(
                     success=success,
