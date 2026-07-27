@@ -60,6 +60,15 @@ def _find_env_file() -> Optional[str]:
     Returns:
         .env文件的完整路径，如果未找到则返回None
     """
+    # Prefer a project-local configuration when running inside Unreal Editor.
+    try:
+        import unreal
+        project_env_path = os.path.join(unreal.Paths.project_config_dir(), "MCPServer.env")
+        if os.path.isfile(project_env_path):
+            return project_env_path
+    except ImportError:
+        pass
+
     # 获取当前文件所在目录 (mcp_server/)
     current_dir = os.path.dirname(os.path.abspath(__file__))
     
@@ -175,10 +184,10 @@ def load_config(force_reload: bool = False) -> dict:
     env_path = _find_env_file()
     
     if env_path:
-        print(f"[MCPConfig] Loading config from: {env_path}", file=sys.stderr)
+        print(f"[MCPConfig] Loading config from: {env_path}")
         env_config = _parse_env_file(env_path)
     else:
-        print("[MCPConfig] No .env file found, using defaults and environment variables", file=sys.stderr)
+        print("[MCPConfig] No .env file found, using defaults and environment variables")
     
     # 获取配置值
     mcp_port_str = _get_config_value("MCP_PORT", str(DEFAULT_MCP_PORT), env_config)
@@ -243,12 +252,12 @@ def load_config(force_reload: bool = False) -> dict:
         "close_graceful_timeout": close_graceful_timeout,
     }
 
-    print(f"[MCPConfig] Configuration loaded:", file=sys.stderr)
-    print(f"  MCP Server: {mcp_host}:{mcp_port}", file=sys.stderr)
-    print(f"  Editor Forwarder: {editor_host}:{editor_port}", file=sys.stderr)
-    print(f"  MyPy Enabled: {mypy_enabled}", file=sys.stderr)
+    print(f"[MCPConfig] Configuration loaded:")
+    print(f"  MCP Server: {mcp_host}:{mcp_port}")
+    print(f"  Editor Forwarder: {editor_host}:{editor_port}")
+    print(f"  MyPy Enabled: {mypy_enabled}")
     if _config_cache["editor_project"]:
-        print(f"  Editor Project: {_config_cache['editor_project']}", file=sys.stderr)
+        print(f"  Editor Project: {_config_cache['editor_project']}")
     
     return _config_cache
 
