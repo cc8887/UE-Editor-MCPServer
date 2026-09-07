@@ -72,11 +72,12 @@ try:
         uvicorn, Starlette, Mount, Route,
         ExecutionResult, build_sse_route_list,
         ToolDefinition, TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE,
-        TOOL_OPEN_EDITOR, TOOL_CLOSE_EDITOR,
+        TOOL_OPEN_EDITOR, TOOL_CLOSE_EDITOR, TOOL_BUILD_PROJECT, TOOL_READ_ARTIFACT, COROUTINE_EXAMPLE,
         get_mcp_tools
     )
     from .MCPConfig import load_config, get_mcp_port, get_mcp_host, get_editor_port, get_editor_host
     from .UEProcessManager import UEProject
+    from .ProjectBuild import build_project, read_artifact
 except ImportError:
     from MCPCore import (
         MCP_AVAILABLE, MCP_IMPORT_ERRORS,
@@ -85,11 +86,12 @@ except ImportError:
         uvicorn, Starlette, Mount, Route,
         ExecutionResult, build_sse_route_list,
         ToolDefinition, TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE,
-        TOOL_OPEN_EDITOR, TOOL_CLOSE_EDITOR,
+        TOOL_OPEN_EDITOR, TOOL_CLOSE_EDITOR, TOOL_BUILD_PROJECT, TOOL_READ_ARTIFACT, COROUTINE_EXAMPLE,
         get_mcp_tools
     )
     from MCPConfig import load_config, get_mcp_port, get_mcp_host, get_editor_port, get_editor_host
     from UEProcessManager import UEProject
+    from ProjectBuild import build_project, read_artifact
 
 # CORS中间件
 try:
@@ -164,6 +166,7 @@ class EditorConnection:
         self._pending_requests: Dict[str, asyncio.Future] = {}
         self._recv_buffer = b""
         self._lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
         self._receive_task: Optional[asyncio.Task] = None
 
         # 状态变化回调
@@ -203,13 +206,17 @@ class EditorConnection:
                     _log(f"[EditorConnection] Disconnected callback error: {e}")
     
     async def connect(self) -> bool:
+        async with self._connect_lock:
+            return await self._connect_once()
+
+    async def _connect_once(self) -> bool:
         """
         连接到编辑器转发服务器
         
         Returns:
             连接是否成功
         """
-        if self._socket:
+        if self.is_connected:
             return True
 
         self._set_state(EditorState.CONNECTING)
@@ -792,7 +799,7 @@ class MCPStandaloneServer:
     BASE_TOOLS = [TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE, TOOL_GET_EDITOR_STATE]
 
     # 项目托管工具（仅在配置了 .uproject 时启用）
-    PROJECT_TOOLS = [TOOL_OPEN_EDITOR, TOOL_CLOSE_EDITOR]
+    PROJECT_TOOLS = [TOOL_OPEN_EDITOR, TOOL_CLOSE_EDITOR, TOOL_BUILD_PROJECT, TOOL_READ_ARTIFACT]
 
     def __init__(self,
                  mcp_host: str = "127.0.0.1",
@@ -819,6 +826,7 @@ class MCPStandaloneServer:
         self.mcp_host = mcp_host
         self.mcp_port = mcp_port
         self.debug = debug
+        self._project_tool_lock = asyncio.Lock()
 
         # 项目管理：仅当传入 .uproject 路径时启用 open_editor / close_editor
         # open/close 内部超时与阈值通过 MCPConfig 注入，不暴露给 MCP 客户端
@@ -917,8 +925,9 @@ class MCPStandaloneServer:
             _log(f"[DEBUG][MCPServer] Arguments: {json.dumps(arguments, indent=2, ensure_ascii=False)[:300]}")
 
         # 1) 进程管理工具：在 MCPStandalone 进程内本地执行（无需编辑器在线）
-        if name in ("open_editor", "close_editor"):
-            return await self._handle_project_tool(name, arguments)
+        if name in ("open_editor", "close_editor", "build_project", "read_artifact"):
+            async with self._project_tool_lock:
+                return await self._handle_project_tool(name, arguments)
 
         # 2) 状态查询：可在断连时返回
         if name == "get_editor_state":
@@ -985,19 +994,33 @@ class MCPStandaloneServer:
             )
 
         try:
+            if name == "build_project":
+                refresh = arguments.get('refresh_makefile', False)
+                if not isinstance(refresh, bool):
+                    raise ValueError('refresh_makefile must be boolean')
+                result = await build_project(self.ue_project, refresh)
+                return ExecutionResult(success=result['status'] == 'succeeded',
+                    data=result)
+
+            if name == "read_artifact":
+                result = await asyncio.to_thread(read_artifact, self.ue_project, arguments['path'],
+                    arguments.get('start_line', 1), arguments.get('line_count', 40))
+                return ExecutionResult(success=True, data=result)
+
             if name == "open_editor":
-                # ready_check：尝试 TCP 连到编辑器内 MCP Forwarder。
-                # 连得上即视为引擎可接收命令；连不上则 fallback 到日志扫描。
-                editor_host = self.editor_connection.host
-                editor_port = self.editor_connection.port
+                # Probe the actual connection from the host loop while UEProject waits in a thread.
+                loop = asyncio.get_running_loop()
+
+                async def _probe() -> bool:
+                    return (await self.editor_connection.connect()
+                            and await self.editor_connection.ping(timeout=2.0))
 
                 def _ready_check() -> bool:
+                    pending = asyncio.run_coroutine_threadsafe(_probe(), loop)
                     try:
-                        with socket.create_connection(
-                            (editor_host, editor_port), timeout=1.0
-                        ):
-                            return True
-                    except OSError:
+                        return pending.result(timeout=self.editor_connection.config.connect_timeout + 3.0)
+                    except Exception:
+                        pending.cancel()
                         return False
 
                 result = await asyncio.to_thread(
@@ -1005,7 +1028,12 @@ class MCPStandaloneServer:
                 )
                 # 启动成功后主动触发一次重连，缩短工具返回到 execute_command 可用的窗口
                 if isinstance(result, str) and result.startswith("READY"):
+                    if not await _probe():
+                        return ExecutionResult(success=False, error='Editor MCP disconnected after readiness check')
                     self._reconnect_event.set()
+                    result += '\n' + json.dumps({'coroutine_example': {
+                        'tool': 'execute_command', 'arguments': {'code': COROUTINE_EXAMPLE},
+                        'expected': 'completed=true; ticks_during_await > 0'}})
                 success = isinstance(result, str) and result.startswith("READY")
                 return ExecutionResult(
                     success=success,
@@ -1036,13 +1064,15 @@ class MCPStandaloneServer:
             return ExecutionResult(
                 success=True,
                 output=result.get('output', 'Execution completed.'),
-                logs=result.get('logs', '')
+                logs=result.get('logs', ''),
+                log_directory=str(self.ue_project.project_dir / 'Saved/Logs/MCP') if self.ue_project else None
             )
         else:
             return ExecutionResult(
                 success=False,
                 error=result.get('error', 'Unknown error'),
-                logs=result.get('logs', '')
+                logs=result.get('logs', ''),
+                log_directory=str(self.ue_project.project_dir / 'Saved/Logs/MCP') if self.ue_project else None
             )
     
     def _setup_mcp_app(self):
@@ -1056,10 +1086,13 @@ class MCPStandaloneServer:
         server_self = self
         
         @mcp_app.call_tool()
-        async def call_tools(name: str, arguments: dict) -> list:
+        async def call_tools(name: str, arguments: dict):
             if server_self.debug:
                 _log(f"[DEBUG][MCPServer] MCP tool request: {name}")
             result = await server_self._handle_tool_call(name, arguments)
+            # MCP 1.5 wraps successful content lists and exceptions into CallToolResult.
+            if not result.success:
+                raise RuntimeError(result.to_text())
             return result.to_mcp_content()
         
         @mcp_app.list_tools()

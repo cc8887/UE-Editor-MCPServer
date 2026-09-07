@@ -12,7 +12,10 @@ UE4 MCP Forwarder - 编辑器内转发服务器
 - 支持多客户端同时连接，每个客户端独立收发
 """
 
+import asyncio
 import json
+import math
+import os
 import time
 import socket
 from typing import Optional, Dict, Any, List
@@ -75,6 +78,11 @@ class MCPForwarder:
         self._pending_responses: List[tuple] = []
         self._is_running = False
         self._last_tick_time = time.time()
+        self._execution_task = None
+        self._execution_client = None
+        self.execution_timeout = float(os.environ.get('MCP_EXECUTION_TIMEOUT', '86400'))
+        if not math.isfinite(self.execution_timeout) or self.execution_timeout <= 0:
+            raise ValueError('MCP_EXECUTION_TIMEOUT must be finite and positive')
         
         # 日志函数（兼容UE4/UE5）
         self._log = self._get_log_function()
@@ -241,7 +249,7 @@ class MCPForwarder:
             request_id = request.get("id")
 
             # 若正在执行，拒绝新的 execute/execute_file 请求，返回错误
-            if msg_type in ("execute", "execute_file"):
+            if msg_type in ("execute", "execute_file", "get_imported_modules"):
                 if self._state == ForwarderState.EXECUTING:
                     error_response = {
                         "type": "result",
@@ -254,10 +262,42 @@ class MCPForwarder:
                     self._log(f"MCPForwarder: Rejected {request_id} (busy)")
                     continue
 
+            if msg_type in ('execute', 'execute_file'):
+                self._state = ForwarderState.EXECUTING
+                self._execution_client = client
+                self._execution_task = asyncio.ensure_future(self._execute_deferred(client, request))
+                self._execution_task.add_done_callback(self._execution_finished)
+                continue
+
             response = self._handle_request(request)
             if response is not None:
                 self._pending_responses.append((client, response))
     
+    def _execution_finished(self, task):
+        if self._execution_task is task:
+            self._execution_task = None
+            self._execution_client = None
+            self._state = ForwarderState.IDLE
+        if not task.cancelled():
+            task.exception()
+
+    async def _execute_deferred(self, client, request):
+        response = {'type': 'result', 'id': request.get('id'), 'success': False}
+        try:
+            operation = (CodeExecutor.execute_file_async(request.get('file', ''))
+                         if request.get('type') == 'execute_file'
+                         else CodeExecutor.execute_code_async(request.get('code', '')))
+            result = await asyncio.wait_for(operation, timeout=self.execution_timeout)
+            response.update(success=result.success, output=result.output, error=result.error, logs=result.logs)
+        except asyncio.TimeoutError:
+            response['error'] = 'Editor execution timed out after %s seconds' % self.execution_timeout
+        except asyncio.CancelledError:
+            response['error'] = 'Editor execution cancelled'
+        except Exception as error:
+            response['error'] = str(error)
+        if client in self._clients:
+            self._pending_responses.append((client, response))
+
     def _handle_request(self, request: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         处理单个请求
@@ -432,6 +472,8 @@ class MCPForwarder:
     
     def _close_client(self, client: socket.socket):
         """关闭指定客户端连接"""
+        if client is self._execution_client and self._execution_task is not None:
+            self._execution_task.cancel()
         if client in self._clients:
             del self._clients[client]
         try:
@@ -441,7 +483,7 @@ class MCPForwarder:
         # 清理该客户端相关的待处理请求和响应
         self._pending_requests = [(c, r) for c, r in self._pending_requests if c != client]
         self._pending_responses = [(c, r) for c, r in self._pending_responses if c != client]
-        if not self._clients:
+        if not self._clients and self._execution_task is None:
             self._state = ForwarderState.IDLE
     
     def stop(self):

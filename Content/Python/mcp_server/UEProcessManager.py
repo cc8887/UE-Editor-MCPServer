@@ -429,7 +429,7 @@ class UEProject:
         3. 编辑器未运行 → 启动
         4. 等待就绪信号：
            - 优先调用 ready_check 回调（建议传入 TCP ping 编辑器内 MCP Forwarder 的函数）
-           - 同时扫描日志，命中 "Engine is initialized" / "ModularStartUp" 也视为就绪
+           - 未提供回调时才使用引擎初始化日志作为就绪信号
         5. 命中就绪信号后再等待 settle_seconds 秒让编辑器稳定，最后返回 READY
 
         Args:
@@ -476,6 +476,7 @@ class UEProject:
                     pass
             subprocess.Popen(
                 [str(self.editor_exe), str(self.uproject_path)],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
             )
@@ -490,9 +491,9 @@ class UEProject:
         """
         轮询直到引擎就绪或超时。命中后再等 settle_seconds，返回 'READY'。
 
-        就绪条件（任一命中即可）：
-        - ready_check() 返回 True（首选；通常是 TCP ping 编辑器内 Forwarder）
-        - 日志扫描状态为 "ready"
+        就绪条件：
+        - 提供回调时，必须由 ready_check() 返回 True
+        - 未提供回调时，日志扫描状态为 "ready"
 
         失败条件：
         - 编辑器进程意外退出
@@ -543,7 +544,7 @@ class UEProject:
                 except OSError:
                     continue
                 status, detail = self.scan_log_status(last_lines)
-                if status == "ready":
+                if status == "ready" and ready_check is None:
                     _log(
                         "[UEProcessManager] Ready signal: log pattern matched; "
                         f"settling for {self.open_settle_seconds}s ..."

@@ -6,6 +6,45 @@
 
 ## 快速开始
 
+### 构建与协程工具
+
+配置 `EDITOR_PROJECT` 后，独立 MCP 服务提供 `build_project` 和 `read_artifact`，
+无需先启动 Editor。`build_project` 等待完整 Win64 Development Editor 目标构建结束，
+返回 JSON：`status`、`exit_code`、`log_path`、`error_lines`。失败会设置 MCP `isError`。
+错误行号是构建日志的 1 基行号；退出失败但没有匹配错误行时仍返回 `failed`。
+完整日志保存在项目 `Saved/Logs/MCPBuild/<id>/`，成功无需再次读日志。
+
+`read_artifact(path, start_line=1, line_count=40)` 仅读取配置项目内部的文件，最多
+200 行、16000 字符。按 `error_lines` 定位诊断。新增/删除源码被目标缓存遗漏时可调用
+`build_project(refresh_makefile=true)`：只备份该目标的项目本地 Makefile.bin，保留
+对象文件和 DDC。构建前必须关闭该项目 Editor；它不替代插件产物版本审计。
+
+`open_editor` 成功返回以 `READY` 开头，下一行 JSON 附带可直接提交的最小协程示例。
+启动进程隔离 stdin，避免继承 MCP stdio 输入造成 Python 初始化等待。
+READY 要求实际 MCP ping 成功，引擎初始化日志不会提前结束 MCP 就绪等待。
+`execute_command` 和 `excute_file` 支持顶层 `async def main()`：等待期间由 Editor
+Tick 推进，结束后返回 JSON 可序列化的结果。同步脚本继续按原有方式执行。
+
+```python
+import asyncio
+import unreal
+
+async def main():
+    await asyncio.sleep(0.5)
+    return {"pie_running": unreal.EditorLevelLibrary.get_game_world() is not None}
+```
+
+原生日志捕获持续到协程结束。长日志落盘，但结果摘要仍直接返回；通过日志路径按需
+读取小范围。调用方断开或执行超时会取消任务，清理应放在 `finally` 中，不要启动
+脱离当前请求的后台任务后立即报告完成。`MCP_EXECUTION_TIMEOUT` 是 Editor 侧环境变量，
+默认 86400 秒；它不能中断阻塞主线程的同步代码，脚本必须使用条件式异步等待。
+客户端请求超时、宿主外层提前返回阈值和 Editor 执行超时是独立设置。
+
+无引擎单元测试：`python Tests/test_project_tools.py`、`python Tests/test_ue_process_manager.py`。
+真实验证：`python Tests/smoke_project_tools.py --project <Game.uproject> --output <new-directory>`。
+项目应加载本仓库 Python 模块；该测试通过实际 stdio MCP 构建、启动、验证协程、检查
+错误恢复并关闭 Editor。可用 `--test-script` 指定返回 `passed`、`pie_stopped` 摘要的核心测试。
+
 ### 1. 安装 Python 依赖
 
 插件根目录下执行（需要 [uv](https://docs.astral.sh/uv/)）：

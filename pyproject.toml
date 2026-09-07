@@ -10,7 +10,8 @@ dependencies = [
     "click",
     "starlette",
     "pywin32",
-    "mypy>=1.0.0"
+    "mypy>=1.0.0",
+    "psutil>=5.9.0"
     ]
 
 [tool.mypy]

@@ -10,6 +10,7 @@ MCPCore - MCP公共核心模块
 """
 
 import os
+import json
 import sys
 from itertools import product
 from datetime import datetime
@@ -143,7 +144,7 @@ class ToolDefinition:
 # 预定义的工具
 TOOL_EXECUTE_COMMAND = ToolDefinition(
     name="execute_command",
-    description="Execute Python code in Unreal Engine editor. The code runs in the editor's main thread.",
+    description="Execute Python on the Editor main thread. If the script defines async def main(), await it on Editor ticks before returning its JSON result and captured logs. Use await for waits, not blocking sleep.",
     input_schema={
         "type": "object",
         "properties": {
@@ -158,7 +159,7 @@ TOOL_EXECUTE_COMMAND = ToolDefinition(
 
 TOOL_EXECUTE_FILE = ToolDefinition(
     name="excute_file",  # 保持原有拼写以兼容
-    description="Execute a Python script file in Unreal Engine editor.",
+    description="Execute a Python file in the Editor. An async def main() entrypoint is awaited before returning its JSON result and logs. Keep cleanup in finally blocks.",
     input_schema={
         "type": "object",
         "properties": {
@@ -205,7 +206,7 @@ TOOL_OPEN_EDITOR = ToolDefinition(
         "Open the Unreal Editor for the configured project and wait until it is ready "
         "to receive commands. Before opening, auto-checks whether compilation is needed: "
         "regenerates project files if .sln is stale, and rebuilds the editor module if "
-        "any source file is newer than the DLL."
+        "any source file is newer than the DLL. Success includes a minimal coroutine example."
     ),
     input_schema={
         "type": "object",
@@ -225,6 +226,35 @@ TOOL_CLOSE_EDITOR = ToolDefinition(
         "properties": {}
     }
 )
+
+TOOL_BUILD_PROJECT = ToolDefinition(
+    name="build_project",
+    description="Build the configured full project Editor target and wait for completion, with the Editor closed. Returns JSON status, exit_code, log_path and 1-based error_lines in that log. Success needs no log reread; failure remains failed even without recognized error lines.",
+    input_schema={"type": "object", "properties": {
+        "refresh_makefile": {"type": "boolean", "default": False,
+            "description": "Back up this target's project-local Makefile.bin before building when added/deleted sources are missed by a cached target."}}})
+
+TOOL_READ_ARTIFACT = ToolDefinition(
+    name="read_artifact",
+    description="Read a bounded 1-based line range from a UTF-8 artifact inside the configured project. Use build error_lines to inspect only relevant diagnostics.",
+    input_schema={"type": "object", "properties": {
+        "path": {"type": "string"}, "start_line": {"type": "integer", "minimum": 1, "default": 1},
+        "line_count": {"type": "integer", "minimum": 1, "maximum": 200, "default": 40}}}, required=["path"])
+
+COROUTINE_EXAMPLE = '''import asyncio
+import unreal
+
+async def main():
+    frames = [0]
+    def tick(delta):
+        frames[0] += 1
+    handle = unreal.register_slate_pre_tick_callback(tick)
+    try:
+        await asyncio.sleep(0.5)
+        return {"completed": True, "ticks_during_await": frames[0]}
+    finally:
+        unreal.unregister_slate_pre_tick_callback(handle)
+'''
 
 # 默认工具列表
 DEFAULT_TOOLS = [TOOL_EXECUTE_COMMAND, TOOL_EXECUTE_FILE]
@@ -273,14 +303,11 @@ def _get_log_dir() -> str:
     # 1. 尝试通过 unreal 获取 UE 项目目录
     try:
         import unreal
-        project_dir = unreal.EditorAssetLibrary.get_current_level_directory()
+        project_dir = unreal.Paths.project_dir()
         if project_dir:
-            # get_current_level_directory 返回 /Game/xxx，取项目根目录
-            project_dir = unreal.Paths.project_dir()
-            if project_dir:
-                log_dir = os.path.join(project_dir, "Saved", "Logs", "MCP")
-                os.makedirs(log_dir, exist_ok=True)
-                return log_dir
+            log_dir = os.path.join(project_dir, "Saved", "Logs", "MCP")
+            os.makedirs(log_dir, exist_ok=True)
+            return log_dir
     except Exception:
         pass
 
@@ -307,7 +334,7 @@ def _get_log_dir() -> str:
     return fallback_dir
 
 
-def _save_log_to_file(full_text: str) -> str:
+def _save_log_to_file(full_text: str, log_dir: str = None) -> str:
     """
     将长日志保存到文件，返回文件路径。
 
@@ -320,7 +347,8 @@ def _save_log_to_file(full_text: str) -> str:
     Returns:
         保存的文件路径
     """
-    log_dir = _get_log_dir()
+    log_dir = log_dir or _get_log_dir()
+    os.makedirs(log_dir, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_name = f"mcp_log_{timestamp}"
     file_path = os.path.join(log_dir, f"{base_name}.txt")
@@ -352,22 +380,29 @@ class ExecutionResult:
     output: str = ""
     error: str = ""
     logs: str = ""
+    log_directory: Optional[str] = None
+    data: Optional[dict] = None
     
     def to_text(self) -> str:
         """转换为文本输出。如果日志超过阈值，保存到文件并返回文件路径。"""
+        if self.data is not None:
+            return json.dumps(self.data, ensure_ascii=False)
         if self.success:
             text = self.output or "Execution completed successfully."
         else:
             text = f"Error: {self.error}" if self.error else "Execution failed."
+
+        if len(text) > 16000:
+            file_path = _save_log_to_file(text + '\n\n' + (self.logs or ''), self.log_directory)
+            return f"[Output exceeded threshold. Full output saved to: {file_path}]"
         
+        if self.logs and _should_spill(self.logs):
+            file_path = _save_log_to_file(self.logs, self.log_directory)
+            return text + f"\n\nCaptured logs saved to: {file_path}"
         if self.logs:
             full_text = text + f"\n\nCaptured Logs:\n{self.logs}"
         else:
             full_text = text
-        
-        if _should_spill(full_text):
-            file_path = _save_log_to_file(full_text)
-            return f"[Output exceeded threshold. Full output saved to: {file_path}]"
         
         return full_text
     
@@ -520,6 +555,38 @@ class CodeExecutor:
             return logs or ""
         return ""
     
+    @classmethod
+    async def execute_code_async(cls, code: str, exec_globals: dict = None) -> ExecutionResult:
+        import asyncio
+        import inspect
+        import json
+        namespace = {} if exec_globals is None else exec_globals
+        enabled = cls._enable_log_capture()
+        result = ExecutionResult(success=False)
+        try:
+            exec(compile(code, namespace.get('__file__', '<mcp>'), 'exec'), namespace)
+            main = namespace.get('main')
+            value = await main() if inspect.iscoroutinefunction(main) else None
+            result = ExecutionResult(success=True, output=json.dumps(value, ensure_ascii=False)
+                                     if value is not None else 'Execution completed successfully.')
+        except asyncio.CancelledError:
+            result = ExecutionResult(success=False, error='Editor execution cancelled or timed out')
+        except Exception as error:
+            result = ExecutionResult(success=False, error=str(error))
+        finally:
+            if enabled:
+                result.logs = cls._disable_log_capture()
+        return result
+
+    @classmethod
+    async def execute_file_async(cls, file_path: str) -> ExecutionResult:
+        try:
+            with open(file_path, encoding='utf-8-sig') as stream:
+                code = stream.read()
+        except (OSError, UnicodeError) as error:
+            return ExecutionResult(success=False, error=str(error))
+        return await cls.execute_code_async(code, {'__file__': file_path, '__name__': '__main__'})
+
     @classmethod
     def execute_code(cls, code: str, exec_globals: dict = None) -> ExecutionResult:
         """
